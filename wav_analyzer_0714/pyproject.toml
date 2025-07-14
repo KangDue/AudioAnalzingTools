@@ -1,0 +1,19 @@
+[project]
+name = "wav-analyzer-0714"
+version = "0.1.0"
+description = "Advanced WAV analyzer for rotation machinery fault diagnosis using 10 feature extraction algorithms"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "pandas>=2.0.0",
+    "librosa>=0.10.0",
+    "PyWavelets>=1.4.0",
+    "matplotlib>=3.7.0",
+    "torch>=2.0.0",
+    "scikit-learn>=1.3.0",
+    "vmdpy>=0.2",
+    "tqdm>=4.65.0",
+    "tkinter-tooltip>=2.0.0"
+]
