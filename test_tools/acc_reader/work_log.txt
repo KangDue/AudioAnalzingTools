@@ -1,0 +1,44 @@
+=== 작업 일지 ===
+
+[2024-12-19] 가속도계 + 오디오 동시 녹음 C++ 프로젝트 시작
+
+목표:
+- accelerometer_ref.md와 audio_record_ref.md를 참고하여 C++ 프로젝트 생성
+- acc.cpp: 가속도계 데이터 수집
+- audio.cpp: 오디오 녹음
+- main.cpp: 두 기능을 동시에 실행하고 저장
+- 동시 시작/종료 보장
+- README.md로 프로젝트 구성 가이드 제공
+
+진행 상황:
+1. 참고 문서 분석 완료
+   - accelerometer_ref.md: Windows Sensor API 사용, CSV 저장
+   - audio_record_ref.md: WASAPI 사용, WAV 저장, 오디오 이펙트 비활성화
+
+다음 단계:
+- acc.cpp 구현 ✓
+- audio.cpp 구현 ✓
+- main.cpp 구현 ✓
+- CMakeLists.txt 생성 ✓
+- README.md 작성 ✓
+
+완료된 작업:
+2. 프로젝트 파일 구현 완료
+   - acc.h/acc.cpp: Accelerometer 클래스, Windows Sensor API 사용
+   - audio.h/audio.cpp: AudioRecorder 클래스, WASAPI 사용, 오디오 이펙트 비활성화
+   - main.cpp: 동시 실행 제어, 타임스탬프 기반 파일명, 진행상황 표시
+   - CMakeLists.txt: 크로스 플랫폼 빌드 설정, Windows 라이브러리 링크
+   - README.md: 상세한 설치/빌드/실행 가이드, 문제해결 방법
+
+3. 주요 기능 구현
+   - 동시 시작/종료 보장 (스레드 기반)
+   - 가속도계: 50Hz 샘플링, CSV 저장
+   - 오디오: 44.1kHz, 16bit, 모노, WAV 저장
+   - 모든 활성 마이크 동시 녹음
+   - 타임스탬프 기반 고유 파일명
+
+4. 사용자 편의성
+   - 명령행 인자로 녹음 시간 조절
+   - 실시간 진행상황 표시
+   - 상세한 에러 메시지
+   - 완성된 설치/배포 가이드

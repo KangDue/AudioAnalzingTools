@@ -1,0 +1,130 @@
+=== Fan Control Utility 개발 작업 일지 ===
+
+날짜: 2024년 12월 19일
+프로젝트: 범용 Windows 노트북 팬 속도 제어 프로그램
+개발 환경: Visual Studio 2022, C++17
+
+=== 완료된 작업 ===
+
+1. 프로젝트 요구사항 분석
+   - project.md 파일 분석 완료
+   - WMI → EC 순서로 시도하는 범용 구조 설계
+   - Intel/AMD/Qualcomm 지원 방안 수립
+
+2. 핵심 클래스 설계 및 구현
+   - FanController.h: 팬 제어 클래스 헤더 파일 작성
+   - FanController.cpp: 팬 제어 로직 구현
+     * WMI 인터페이스 구현
+     * EC 직접 접근 구현
+     * 이중화 구조로 안정성 확보
+
+3. 메인 프로그램 구현
+   - main.cpp: CLI 인터페이스 구현
+   - 사용자 친화적인 명령어 구조
+   - 관리자 권한 확인 기능
+   - 상세한 오류 메시지 및 도움말
+
+4. Visual Studio 2022 프로젝트 설정
+   - FanControl.vcxproj: 프로젝트 파일 생성
+   - FanControl.sln: 솔루션 파일 생성
+   - UAC 관리자 권한 자동 요청 설정
+   - 필요한 라이브러리 링크 설정
+
+5. 문서화
+   - README.md: 상세한 빌드 및 사용 가이드 작성
+   - Visual Studio 2022 빌드 방법 설명
+   - 릴리스 배포 가이드 포함
+   - 문제 해결 섹션 추가
+
+=== 구현된 주요 기능 ===
+
+1. 팬 정보 조회 (fanctl info)
+   - 팬 ID, 현재 모드, 레벨, RPM 표시
+   - WMI/EC 접근 방식 표시
+
+2. 팬 속도 제어 (fanctl set <id> <level>)
+   - 1~5 레벨로 팬 속도 설정
+   - 설정 후 상태 확인
+
+3. 자동 모드 전환 (fanctl auto <id>)
+   - BIOS 기본 제어로 복귀
+   - 안전한 운영 보장
+
+4. 범용 호환성
+   - WMI 우선 시도, 실패 시 EC 접근
+   - 다양한 OEM WMI 클래스 지원
+   - 표준 EC 메모리 맵 사용
+
+=== 기술적 특징 ===
+
+1. 이중화 구조
+   - WMI (Windows Management Instrumentation) 방식
+   - EC (Embedded Controller) 직접 접근 방식
+   - 하나가 실패해도 다른 방식으로 동작
+
+2. 안전성
+   - 관리자 권한 확인
+   - 입력 값 검증
+   - 오류 처리 및 복구
+
+3. 사용성
+   - 직관적인 CLI 인터페이스
+   - 상세한 상태 정보 제공
+   - 도움말 및 사용 예시
+
+=== 빌드 설정 ===
+
+- 플랫폼: Win32, x64 지원
+- 구성: Debug, Release
+- C++ 표준: C++17
+- 링크 라이브러리: wbemuuid.lib, ole32.lib, oleaut32.lib
+- UAC 실행 레벨: RequireAdministrator
+
+=== 다음 단계 계획 ===
+
+1. 실제 하드웨어에서 테스트
+   - 다양한 노트북 브랜드 테스트
+   - WMI 클래스 이름 확인 및 조정
+   - EC 메모리 맵 주소 검증
+
+2. 기능 개선
+   - 온도 모니터링 추가
+   - 팬 커브 설정 기능
+   - GUI 버전 개발 고려
+
+3. 배포 준비
+   - 디지털 서명 적용
+   - 설치 프로그램 제작
+   - 사용자 매뉴얼 보완
+
+=== 주의사항 ===
+
+- 하드웨어 직접 제어로 인한 위험성 존재
+- 관리자 권한 필수
+- 노트북별 호환성 차이 가능
+- 과열 방지를 위한 안전 장치 필요
+
+=== 파일 구조 ===
+
+Fantest/
+├── FanController.h      # 팬 제어 클래스 헤더
+├── FanController.cpp    # 팬 제어 클래스 구현
+├── main.cpp            # 메인 프로그램
+├── FanControl.vcxproj  # Visual Studio 프로젝트 파일
+├── FanControl.sln      # Visual Studio 솔루션 파일
+├── README.md           # 사용 및 빌드 가이드
+├── project.md          # 원본 요구사항 문서
+└── work_log.txt        # 이 작업 일지
+
+=== 작업 완료 상태 ===
+
+✅ 요구사항 분석
+✅ 아키텍처 설계
+✅ 핵심 클래스 구현
+✅ CLI 인터페이스 구현
+✅ Visual Studio 프로젝트 설정
+✅ 빌드 시스템 구성
+✅ 문서화
+✅ 작업 일지 작성
+
+프로젝트 기본 구조 완성. 실제 하드웨어 테스트 및 세부 조정 단계로 진행 가능.
