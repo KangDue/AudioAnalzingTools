@@ -1,0 +1,307 @@
+BLDC Motor Simulation Work Log
+===============================
+
+2024-12-30 Issues Resolved:
+
+1. RADIAL FLUX CALCULATION FIXES:
+   - Fixed calculate_radial_flux() method in motor_simulation.py to properly consider electrical angle changes
+   - Added flux_beta calculation for complete Park inverse transformation
+   - Implemented position-dependent radial flux modulation using poles and electrical angle
+   - Formula: radial_flux = flux_alpha * (1.0 + 0.1 * cos(poles * theta_electrical))
+   - This ensures radial flux varies with electrical angle changes and reflects high-frequency signal injection
+
+2. ROTOR POLE FLUX CALCULATION FIXES:
+   - Completely rewrote calculate_rotor_flux_perspective() method
+   - Now properly accounts for mechanical angle changes (theta_mechanical)
+   - Includes circular position effects with multiple modulation components:
+     * Stator slot effects (spatial harmonics)
+     * Mechanical angle variation as rotor passes through different magnetic field regions
+     * Electrical-mechanical angle interaction effects
+   - Uses combined electrical angle (theta_electrical + current_rotation_angle) for accurate flux calculation
+   - Implements position-dependent modulation: slot_modulation, mechanical_modulation, interaction_modulation
+
+3. RPM/RPS DISPLAY FIXES:
+   - Fixed zero RPM issue by ensuring apply_parameters() is called during GUI initialization
+   - This properly sets current_angle_increment from default value (5.73 degrees)
+   - Updated main_gui.py to display both mechanical and electrical RPM/RPS
+   - Added import math to resolve NameError in electrical RPM calculation
+   - Enhanced torque calculation with electromagnetic, speed control, and reluctance torque components
+
+4. SIMPLIFIED RPM CALCULATION (Final Implementation):
+   - REMOVED complex motor dynamics (inertia, damping, torque-based acceleration)
+   - IMPLEMENTED direct calculation based on electrical parameters only:
+     * electrical_speed = current_angle_increment × pwm_frequency (rad/s)
+     * omega_mechanical = electrical_speed ÷ (poles/2)
+     * rpm = omega_mechanical × 60 ÷ (2π)
+   - This provides immediate, predictable RPM values for simulation purposes
+   - RPM directly correlates with current_angle_increment and PWM frequency
+   - No complex dynamics - pure mathematical relationship for simulation
+
+5. TECHNICAL IMPROVEMENTS:
+   - Radial flux now considers electrical angle changes through real-time theta_electrical updates
+   - Rotor pole flux accounts for mechanical rotation and circular position effects
+   - Current angle increment properly initialized to generate appropriate RPM
+   - All flux calculations now include permanent magnet flux linkage
+   - Proper Park inverse transformation with combined angles for accurate sideband generation
+   - Simplified motor model for simulation purposes
+
+FINAL RPM CALCULATION FORMULA:
+- electrical_speed = current_angle_increment × pwm_frequency
+- mechanical_speed = electrical_speed ÷ (poles/2)
+- RPM = mechanical_speed × 60 ÷ (2π)
+
+Example with default values:
+- current_angle_increment = 0.1 rad (5.73°)
+- pwm_frequency = 30,000 Hz
+- poles = 4
+- electrical_speed = 0.1 × 30,000 = 3,000 rad/s
+- mechanical_speed = 3,000 ÷ 2 = 1,500 rad/s
+- RPM = 1,500 × 60 ÷ (2π) ≈ 14,324 RPM
+
+Simulation now provides direct, predictable RPM calculation for testing purposes.
+
+## 2024-12-19 RPM 계산 단순화
+
+### 문제점
+- 사용자가 RPM 계산이 복잡한 모터 동역학 대신 전기적 파라미터(전기각 변화 속도, PWM 주파수, 극 수)에만 의존해야 한다고 요청
+
+### 해결책
+- `motor_simulation.py`의 `update_mechanical_dynamics` 메서드에서 RPM 계산을 단순화
+- 새로운 공식: `rpm = (current_angle_increment * pwm_frequency * 60) / (2 * math.pi * poles)`
+- 복잡한 토크, 관성, 댐핑 계산 제거하고 직접적인 전기적 파라미터 기반 계산으로 변경
+
+### 기술적 세부사항
+- **공식**: RPM = (전기각 증분 × PWM 주파수 × 60) / (2π × 극 수)
+- **예시**: current_angle_increment=0.1, pwm_frequency=30000, poles=4 → RPM = (0.1 × 30000 × 60) / (2π × 4) ≈ 7162 RPM
+- **장점**: 예측 가능한 RPM 값, 시뮬레이션에 적합한 직접적 관계, 복잡한 동역학 없이 명확한 제어
+
+### 결과
+- RPM이 이제 입력 파라미터에 직접적으로 비례하여 예측 가능
+- 시뮬레이션 목적에 맞는 단순하고 명확한 계산
+- 사용자 요구사항 완전 충족
+
+## 2024-12-19 Radial Flux 및 Rotor Pole Flux 계산 개선
+
+### 문제점
+- 사용자가 radial flux와 rotor pole flux가 제대로 반영되지 않았다고 지적
+- 기존 계산에서 물리적으로 부정확한 부분들 발견
+
+### Radial Flux 계산 개선
+- **기존 문제**: 전류각 회전과 로터 전기각을 단순히 더하는 부정확한 계산
+- **개선 사항**:
+  - 스테이터 고정 좌표계에서의 방사 방향 자속으로 정의
+  - Park 역변환으로 alpha, beta축 자속 계산 후 크기 계산
+  - 스테이터 슬롯 효과 (12슬롯 가정), 극 고조파, 사이드밴드 효과 포함
+  - 물리적으로 의미 있는 자속 크기 기반 계산
+
+### Rotor Pole Flux 계산 개선
+- **기존 문제**: 과도하게 복잡한 변조 효과와 부정확한 좌표 변환
+- **개선 사항**:
+  - 로터 극 방향으로의 자속 성분으로 명확히 정의
+  - 방사 방향과 접선 방향 자속 성분 분리 계산
+  - 극 쌍 수에 따른 기본 변조, 스테이터 슬롯 고조파, 회전 속도 동적 효과 포함
+  - 물리적으로 의미 있는 내적 기반 계산
+
+### 기술적 세부사항
+- **Radial Flux**: `sqrt(flux_alpha² + flux_beta²) × (1 + 슬롯고조파 + 극고조파 + 사이드밴드)`
+- **Rotor Pole Flux**: `(방사성분 + 0.1×접선성분) × (1 + 극변조 + 슬롯변조 + 속도변조)`
+- 두 계산 모두 영구자석 자속 링크지 포함
+- 적절한 공간 고조파 및 동적 효과 반영
+
+### 결과
+- 물리적으로 정확한 자속 계산
+- GUI에서 의미 있는 자속 파형 표시
+- 모터 시뮬레이션의 정확도 향상
+
+## 2024-12-19 Flux 계산 Alpha 성분 전용 수정
+
+### 문제점
+- 사용자가 FFT 결과가 이상하게 나온다고 지적
+- rotor pole flux와 radial flux에서 radial 성분만 고려해야 한다고 요청
+- inverse park 변환 시 alpha 성분만 사용하라고 명시적 요청
+
+### 해결책
+- **Radial Flux 수정**: `sqrt(flux_alpha² + flux_beta²)` → `flux_alpha`만 사용
+- **Rotor Pole Flux 수정**: `rotor_radial_flux + 0.1 * rotor_tangential_flux` → `rotor_radial_flux`만 사용
+- 두 계산 모두에서 alpha 성분(radial 성분)만 고려하도록 변경
+
+### 기술적 세부사항
+- **Radial Flux**: `radial_flux = flux_alpha * (1 + harmonics)`
+- **Rotor Pole Flux**: `rotor_flux = flux_alpha * cos_rotor + flux_beta * sin_rotor`
+- 접선 방향 성분 제거하여 순수 radial 성분만 사용
+- FFT 분석에 적합한 명확한 신호 생성
+
+### 결과
+- FFT 분석에 적합한 깔끔한 신호 생성
+- 사용자 요구사항에 정확히 부합하는 radial 성분 전용 계산
+- 더 명확한 주파수 스펙트럼 분석 가능
+
+## 2024-12-19 DC 성분 제거로 FFT 분석 개선
+
+### 문제점
+- 사용자가 FFT 결과에서 low frequency와 DC 성분이 너무 크게 나온다고 지적
+- 영구자석 자속(flux_linkage)이 DC 성분으로 작용하여 FFT 스펙트럼을 왜곡
+- 정상적인 AC 신호 분석이 어려운 상황
+
+### 해결책
+- **Radial Flux**: 영구자석 자속(flux_linkage) 제거, AC 성분만 계산
+- **Rotor Pole Flux**: 동일하게 DC 성분 제거, AC 성분만 사용
+- 고조파 효과도 곱셈 대신 덧셈으로 변경하여 DC 오프셋 제거
+
+### 기술적 세부사항
+- **기존**: `flux_d = self.Ld * self.id + self.flux_linkage` (DC 포함)
+- **수정**: `flux_d_ac = self.Ld * self.id` (DC 제거)
+- **기존**: `radial_flux = base * (1.0 + harmonics)` (곱셈, DC 오프셋 생성)
+- **수정**: `radial_flux = base + harmonics` (덧셈, 순수 AC)
+- 모든 flux 계산에서 영구자석 자속 성분 완전 제거
+
+### 결과
+- DC 성분 대폭 감소로 FFT 분석 정확도 향상
+- Low frequency 노이즈 제거로 깔끔한 주파수 스펙트럼
+- 순수 AC 신호로 정상적인 FFT 분석 가능
+- 모터의 동적 특성만 반영하는 신호 생성
+
+## 2024-12-19 FFT 분석 알고리즘 전면 개선
+
+### 문제점
+- 사용자가 FFT 결과가 계속 이상하게 나온다고 지적
+- 기존 FFT는 단순한 numpy.fft.fft() 사용으로 스펙트럼 누설과 DC 성분 문제
+- 윈도우 함수 미적용으로 인한 부정확한 주파수 분석
+- 선형 스케일로 인해 작은 신호 성분 확인 어려움
+
+### 해결책
+- **데이터 전처리**: 모든 신호에서 평균값 제거로 DC 성분 완전 제거
+- **윈도우 함수**: Hanning 윈도우 적용으로 스펙트럼 누설 방지
+- **정규화**: 윈도우 함수 보정을 통한 정확한 크기 계산
+- **주파수 필터링**: 0.1Hz 이하 극저주파 성분 제외
+- **로그 스케일**: semilogy() 사용으로 넓은 동적 범위 표시
+
+### 기술적 세부사항
+- **전처리**: `data = data - np.mean(data)` (DC 제거)
+- **윈도우**: `window = np.hanning(len(data))` (스펙트럼 누설 방지)
+- **정규화**: `magnitude = magnitude * 2.0 / np.sum(window)` (윈도우 보정)
+- **필터링**: `pos_mask = freqs > 0.1` (극저주파 제외)
+- **표시**: `semilogy()` (로그 스케일)
+
+### 적용 범위
+- D축 전류 FFT
+- Q축 전류 FFT  
+- Radial Flux FFT
+- Rotor Pole Flux FFT
+
+### 결과
+- 정확한 주파수 스펙트럼 분석 가능
+- DC 및 극저주파 노이즈 완전 제거
+- 작은 고조파 성분까지 명확하게 표시
+- 전문적인 FFT 분석 도구 수준의 정확도 달성
+
+## 2024-12-19 Rotor Pole Flux에 U,V,W 코일 Zone 효과 추가
+
+### 문제점
+- 사용자가 rotor pole flux 계산에서 pole이 회전하면서 U,V,W 코일 zone에 따라 변하는 radial flux 변동이 반영되지 않았다고 지적
+- 기존 계산은 단순한 rotor pole 위치만 고려하고 3상 코일의 공간적 배치 효과 무시
+- 실제 모터에서는 rotor pole이 각 상 코일 영역을 지날 때 flux 변화가 발생
+
+### 해결책
+- **3상 코일 Zone 모델링**: U,V,W 상 코일의 120도 공간 배치 반영
+- **개별 상 효과 계산**: 각 상 코일 zone에서의 radial flux 변동 독립 계산
+- **위상차 적용**: 각 상간 120도(2π/3) 위상차 정확히 반영
+- **전기각 연동**: 3차 고조파 성분으로 코일 zone 효과 모델링
+
+### 기술적 세부사항
+- **U상 코일 zone**: `0.08 * cos(rotor_position) * cos(3 * θ_electrical)`
+- **V상 코일 zone**: `0.08 * cos(rotor_position - 2π/3) * cos(3 * θ_electrical - 2π/3)`
+- **W상 코일 zone**: `0.08 * cos(rotor_position - 4π/3) * cos(3 * θ_electrical - 4π/3)`
+- **종합 효과**: `coil_zone_modulation = u_coil_flux + v_coil_flux + w_coil_flux`
+- **최종 반영**: rotor flux에 coil zone modulation 추가
+
+### 물리적 의미
+- **공간 고조파**: 3상 코일의 공간적 배치로 인한 자기장 왜곡
+- **회전 효과**: rotor pole이 각 상 코일 영역을 지날 때의 flux 변화
+- **전기각 연동**: 전기각 3차 고조파로 코일 권선 효과 표현
+- **상호작용**: rotor 위치와 전기각의 결합 효과
+
+### 결과
+- 실제 모터의 3상 코일 배치 효과 정확히 반영
+- rotor pole이 각 상 코일 zone을 지날 때의 flux 변동 모델링
+- 더욱 현실적인 rotor pole flux 신호 생성
+- FFT 분석에서 3상 코일 관련 고조파 성분 확인 가능
+
+## 2024-12-19 Radial Flux와 Rotor Pole Flux 계산 일관성 개선
+
+### 문제점
+- 사용자가 radial flux FFT와 rotor pole flux FFT 결과가 반대로 나오고 있다고 지적
+- radial flux는 alpha 성분만 사용하는데, rotor pole flux는 alpha와 beta 성분을 모두 사용
+- 두 계산 방법의 불일치로 인해 FFT 결과가 예상과 다르게 나타남
+- 물리적으로 유사한 특성을 가져야 하는 두 flux가 서로 다른 방식으로 계산됨
+
+### 해결책
+- **계산 방법 통일**: rotor pole flux도 radial flux와 동일하게 alpha 성분만 사용
+- **beta 성분 제거**: rotor pole flux에서 beta 성분과 sin_rotor 항 완전 제거
+- **단순화된 변조**: rotor pole 위치에 따른 cos 변조만 적용
+- **일관성 확보**: 두 flux 모두 동일한 기본 신호(flux_alpha_ac)에서 출발
+
+### 기술적 세부사항
+- **기존 rotor pole flux**: `flux_alpha * cos_rotor + flux_beta * sin_rotor`
+- **수정된 rotor pole flux**: `flux_alpha * cos_rotor` (beta 성분 제거)
+- **radial flux**: `flux_alpha` (기본 alpha 성분)
+- **공통 기반**: 두 flux 모두 `flux_alpha_ac = flux_d * cos(θ_e) - flux_q * sin(θ_e)` 사용
+
+### 물리적 의미
+- **radial flux**: 스테이터 고정 좌표계에서의 방사 방향 자속
+- **rotor pole flux**: 로터 극 위치에서 측정되는 방사 방향 자속 (rotor 위치 변조 적용)
+- **관계**: rotor pole flux = radial flux × cos(rotor_position) + 고조파 효과
+- **일관성**: 두 flux 모두 동일한 물리적 기반에서 계산
+
+### 결과
+- radial flux와 rotor pole flux FFT 결과의 일관성 확보
+- 두 신호 간의 물리적 관계 명확화
+- FFT 분석에서 예상 가능한 주파수 성분 관계
+- 더 정확한 모터 특성 분석 가능
+
+## 2024-12-19 3상 코일 Zone 효과 위치 수정 및 Pole 수 고려 개선
+
+### 문제점
+- 3상 코일 Zone 효과가 rotor pole flux에 잘못 적용됨
+- pole 수에 따른 u,v,w zone 형태 변화 미고려
+- 물리적으로 부정확한 모델링
+
+### 해결 방법
+- 3상 코일 Zone 효과를 radial flux로 이동
+- pole 수에 따른 공간 고조파 차수 조정
+- rotor pole flux에서 코일 zone 효과 제거
+
+### 기술적 세부사항
+**Radial Flux에 추가된 3상 코일 Zone 효과:**
+```python
+# pole 수에 따른 공간 고조파 차수 계산
+coil_harmonic_order = self.poles // 2  # pole 쌍 수 기반
+
+# U상 코일 zone (0도 기준)
+u_coil_flux = 0.08 * math.cos(coil_harmonic_order * self.theta_electrical) * math.cos(self.theta_mechanical)
+
+# V상 코일 zone (120도 위상차)
+v_coil_flux = 0.08 * math.cos(coil_harmonic_order * self.theta_electrical - 2*math.pi/3) * math.cos(self.theta_mechanical - 2*math.pi/3)
+
+# W상 코일 zone (240도 위상차)
+w_coil_flux = 0.08 * math.cos(coil_harmonic_order * self.theta_electrical - 4*math.pi/3) * math.cos(self.theta_mechanical - 4*math.pi/3)
+
+# 종합 효과
+coil_zone_modulation = u_coil_flux + v_coil_flux + w_coil_flux
+```
+
+**Rotor Pole Flux에서 제거:**
+- U,V,W 코일 zone 관련 코드 완전 제거
+- 단순화된 rotor pole flux 계산
+
+### 물리적 의미
+- **Radial Flux**: 스테이터 코일 배치에 직접 영향받음
+- **3상 코일 Zone**: 120도 간격 배치된 U,V,W 코일의 공간적 분포
+- **Pole 수 고려**: pole 쌍 수에 따른 공간 고조파 차수 조정
+- **전기각-기계각 연동**: 전기각과 기계각 모두 고려한 현실적 모델링
+
+### 예상 결과
+- 물리적으로 정확한 radial flux 모델링
+- pole 수에 따른 적응적 코일 zone 효과
+- 더 현실적인 3상 BLDC 모터 특성 반영
+- FFT 분석에서 올바른 고조파 성분 관찰
