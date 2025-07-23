@@ -1,0 +1,85 @@
+# Audio Focusing Simulation 프로젝트 작업일지
+
+## 프로젝트 개요
+- 프로젝트명: Audio Focusing & Visualization Simulator
+- 언어: Python
+- 핵심 알고리즘: Fractional Delay Filter-and-Sum Beamforming (FD-FAS)
+- 목적: 원형 마이크 어레이로 70x70 grid 평면의 음장 포커싱/시각화
+
+## 작업 계획
+1. 프로젝트 폴더 구조 설정
+2. 핵심 모듈 스캐폴드 생성 (mic_array.py, signal_model.py, fd_beamforming.py, plot_utils.py, main.py)
+3. 최신 효율적인 beamforming 알고리즘 조사
+4. 핵심 알고리즘 구현
+5. 시각화 및 UI 구현
+6. 테스트 및 최적화
+
+## 작업 진행 상황
+
+### Day 1 - 프로젝트 시작
+- [완료] 프로젝트 브리프 분석
+- [완료] 프로젝트 구조 설정
+- [완료] 핵심 모듈 스캐폴드 생성
+  - mic_array.py: 원형 마이크 어레이 클래스
+  - signal_model.py: 음원 및 신호 시뮬레이션
+  - fd_beamforming.py: FD Filter-and-Sum Beamforming
+  - plot_utils.py: 시각화 유틸리티
+  - main.py: 메인 실행 파일
+- [완료] requirements.txt 및 README.md 생성
+
+## 현재 진행 상황
+
+### 완료된 작업
+1. ✅ 프로젝트 브리프 분석 완료
+2. ✅ 프로젝트 구조 설정 완료
+3. ✅ 핵심 모듈 스캐폴드 생성 완료
+   - mic_array.py: CircularMicArray 클래스 완전 구현
+   - signal_model.py: AudioSource, SignalSimulator 클래스 완전 구현
+   - fd_beamforming.py: 다중 beamforming 알고리즘 구현
+   - plot_utils.py: AudioVisualization 클래스 완전 구현
+   - main.py: AudioFocusingSimulator 클래스 완전 구현
+4. ✅ requirements.txt 생성
+5. ✅ README.md 생성
+6. ✅ 최신 beamforming 알고리즘 조사 및 구현
+   - Filter-and-Sum Beamforming (기본)
+   - MVDR (Minimum Variance Distortionless Response)
+   - Robust MVDR (공분산 행렬 재구성 포함)
+7. ✅ 핵심 알고리즘 구현 완료
+   - Steering vector 계산
+   - Distance 계산
+   - Array manifold 계산
+   - 다중 beamforming 타입 지원
+
+### 다음 단계
+1. ⏳ 시뮬레이션 테스트 및 검증
+2. ⏳ 성능 비교 분석
+3. ⏳ 최적화 및 디버깅
+4. ⏳ 문서화 완성
+
+### 이슈 및 해결방안
+- 없음
+
+## 기술적 결정사항
+
+### 기본 설정
+- 마이크 개수: 8개 (기본값)
+- FFT 크기: 1024
+- Hop 크기: 512
+- 배열 반지름: 0.1m (10cm)
+- 타겟 평면 거리: 1.0m
+- 그리드 크기: 70x70 픽셀
+- 샘플링 레이트: 16kHz
+
+### 알고리즘 선택
+- 다중 Beamforming 알고리즘 지원:
+  1. Filter-and-Sum (FD-FAS) - 기본값
+  2. MVDR (Minimum Variance Distortionless Response)
+  3. Robust MVDR (공분산 행렬 재구성)
+- STFT 기반 주파수 도메인 처리
+- Steering vector 기반 방향성 제어
+- 대각선 로딩 및 정규화를 통한 수치적 안정성 확보
+
+### 최신 기술 적용
+- 2023-2024년 최신 beamforming 연구 결과 반영
+- 공분산 행렬 재구성을 통한 robust 처리
+- 적응형 beamforming 기법 구현
