@@ -1,0 +1,18 @@
+# Audio Analysis & Preprocessing Tool Requirements
+
+# GUI Framework
+customtkinter>=5.2.0
+
+# Audio Processing
+soundfile>=0.12.1
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Data Storage
+h5py>=3.8.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Additional utilities
+pandas>=2.0.0

@@ -1,0 +1,166 @@
+# Audio Analysis & Preprocessing Tool 개발 작업일지
+
+## 프로젝트 개요
+- 프로젝트명: Audio Analysis & Preprocessing Tool (Python + customtkinter)
+- UI Framework: customtkinter
+- 핵심 라이브러리: soundfile, numpy, scipy.signal, h5py, matplotlib
+
+## 주요 기능
+1. 폴더 선택 & WAV 파일 리스트 표시
+2. WAV → HDF5 전처리 (STFT magnitude, Spectrum, Raw WAV 저장)
+3. 파일 선택 시 로드 & 시각화 (Waveform, Spectrum, Spectrogram)
+4. 사용자 정의 Feature 계산 및 히스토그램 시각화
+
+## 개발 계획
+1. 프로젝트 구조 설계 및 초기 파일 생성
+2. GUI 뼈대 구현 (customtkinter)
+3. 오디오 처리 모듈 구현 (STFT, Spectrum 계산)
+4. HDF5 저장/로드 모듈 구현
+5. 시각화 모듈 구현
+6. Feature 계산 모듈 구현
+7. 통합 테스트 및 최적화
+
+---
+
+## 작업 기록
+
+### Day 1 - 프로젝트 시작
+**날짜:** 2024년 현재
+**작업 내용:**
+- 프로젝트 명세서 검토 완료
+- 작업일지 생성
+- 다음 단계: 프로젝트 구조 설계 및 초기 파일 생성
+
+**진행 상황:**
+- [x] 프로젝트 명세서 분석
+- [x] 프로젝트 구조 설계
+- [x] 초기 파일 생성
+- [x] GUI 뼈대 구현
+- [x] 오디오 처리 모듈 구현
+- [x] HDF5 관리 모듈 구현
+- [x] 시각화 모듈 구현
+- [x] Feature 계산 모듈 구현
+- [x] README.md 작성
+- [x] 의존성 설치 및 테스트
+- [x] 기본 기능 동작 확인
+- [x] 애플리케이션 실행 성공
+
+**완료된 작업:**
+- requirements.txt 생성 (필요한 라이브러리 정의)
+- main.py 생성 (메인 GUI 애플리케이션)
+- audio_processor.py 생성 (WAV 로드, STFT, Spectrum 계산)
+- hdf5_manager.py 생성 (HDF5 저장/로드 관리)
+- gui_components.py 생성 (파일 리스트, 시각화 프레임)
+- feature_calculator.py 생성 (Feature 계산 및 히스토그램)
+- README.md 생성 (프로젝트 사용법 설명)
+
+**최근 업데이트:**
+- Spectrogram 시각화에 vmin, vmax 컨트롤 추가
+- 사용자가 컬러 스케일 범위를 직접 설정 가능
+- "auto" 입력 시 자동 스케일링 적용
+- 실시간 적용 버튼 및 Enter 키 바인딩
+
+## 2024-12-19 개발 진행 상황
+
+### 완료된 작업
+1. ✅ 프로젝트 구조 설계 및 초기 파일 생성
+2. ✅ GUI 스켈레톤 구현 (main.py)
+3. ✅ 오디오 처리 모듈 (audio_processor.py)
+4. ✅ HDF5 관리 모듈 (hdf5_manager.py)
+5. ✅ 시각화 컴포넌트 (gui_components.py)
+6. ✅ 특징 계산 모듈 (feature_calculator.py)
+7. ✅ README.md 작성
+8. ✅ 의존성 설치 (pip install -r requirements.txt)
+9. ✅ 기본 기능 테스트 및 애플리케이션 실행 확인
+10. ✅ Spectrogram 시각화에 vmin, vmax 컨트롤 추가
+11. ✅ HDF5 저장 구조 변경 - 폴더명을 최상위 그룹으로 사용
+
+### HDF5 구조 변경 내용 (최종)
+- **기존 구조**: 각 WAV 파일마다 개별 HDF5 파일 생성
+- **새로운 구조**: 폴더별로 하나의 HDF5 파일, 각 WAV 파일은 파일명 그룹으로 저장
+  ```
+  폴더명.h5
+  ├── 파일1/
+  │   ├── raw_data
+  │   ├── stft
+  │   ├── spectrum
+  │   └── meta/
+  ├── 파일2/
+  │   ├── raw_data
+  │   ├── stft
+  │   ├── spectrum
+  │   └── meta/
+  └── ...
+  ```
+- **장점**: 파일 수 감소, 폴더별 통합 관리, 효율적인 저장
+- **호환성**: 기존 구조 파일도 로드 가능하도록 호환성 유지
+- **수정된 함수**: save_audio_data, load_audio_data, check_hdf5_integrity, convert_wav_to_hdf5_batch
+
+## 2024-12-19: HDF5 로딩 로직 수정 및 이전 구조 정리
+
+### 문제점 발견
+- H5 파일이 생성되었음에도 WAV 파일로 로드되는 문제
+- 전처리 기능에서 이전 데이터 구조(개별 .h5 파일) 관련 로직 잔존
+
+### 수정된 파일들
+
+#### 1. main.py
+- **load_and_visualize_file()**: 개별 .h5 파일 확인 로직 제거, 새로운 HDF5 구조 사용
+- **run_preprocessing()**: 개별 파일 처리 로직을 일괄 변환(convert_wav_to_hdf5_batch) 사용으로 변경
+
+#### 2. feature_calculator.py
+- **calculate_features_for_files()**: 개별 .h5 파일 확인 로직 제거, 새로운 HDF5 구조 사용
+
+### 변경 사항 요약
+- **이전**: 각 WAV 파일마다 개별 .h5 파일 생성/확인
+- **현재**: 폴더별 단일 HDF5 파일에서 WAV 파일명 그룹으로 데이터 로드
+- **호환성**: HDF5에서 로드 실패시 WAV 파일에서 직접 로드하는 fallback 유지
+
+#### 추가 버그 수정
+- **feature_calculator.py**: `h5_path` 변수 참조 오류 수정
+  - 문제: 'has_hdf5': h5_path.exists()에서 h5_path 변수가 정의되지 않음
+  - 해결: 'has_hdf5': audio_data is not None and 'stft_data' in audio_data로 변경
+  - 결과: Feature 계산 시 오류 없이 정상 동작
+
+## 2024-12-19: H5 파일 선택 기능 추가
+
+### 새로운 기능
+- **H5 파일 직접 선택**: 폴더 선택 외에 H5 파일을 직접 선택 가능
+- **통합 인터페이스**: H5 파일 선택 시에도 폴더 선택과 동일한 기능 사용 가능
+- **스마트 모드 전환**: 폴더 모드와 H5 모드 자동 구분
+
+### 구현된 기능들
+
+#### 1. GUI 개선
+- **H5 파일 선택 버튼** 추가
+- **통합 경로 표시**: "폴더 또는 H5 파일이 선택되지 않았습니다."
+- **모드별 버튼 상태 관리**: H5 모드에서는 전처리 버튼 비활성화
+
+#### 2. 핵심 함수 추가
+- **select_h5_file()**: H5 파일 선택 및 모드 설정
+- **scan_h5_files()**: H5 파일 내 그룹을 WAV 파일 목록으로 변환
+- **모드 구분 로직**: is_h5_mode 플래그로 동작 방식 제어
+
+#### 3. 데이터 처리 로직
+- **가상 WAV 파일 경로**: H5 그룹명을 기반으로 WAV 파일 경로 생성
+- **기존 로직 재사용**: 파일 선택, 시각화, Feature 계산 모두 동일하게 작동
+- **전처리 스킵**: H5 모드에서는 전처리 불필요 메시지 표시
+
+### 사용자 워크플로우
+
+#### 폴더 모드 (기존)
+1. "폴더 선택" → WAV 파일 스캔 → 전처리 → 분석
+
+#### H5 모드 (신규)
+1. "H5 파일 선택" → 그룹 스캔 → 바로 분석 (전처리 불필요)
+
+### 기술적 세부사항
+- **H5 그룹 탐지**: h5py로 파일 내 그룹명 추출
+- **경로 매핑**: 그룹명 → 가상 WAV 파일 경로 변환
+- **호환성**: 기존 HDF5Manager.load_audio_data() 그대로 사용
+- **상태 관리**: current_h5_file, is_h5_mode 변수로 모드 추적
+
+## 다음 단계
+- H5 파일 선택 기능 테스트
+- 폴더 모드와 H5 모드 간 전환 테스트
+- 사용자 피드백 수집 및 개선사항 적용
