@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QGridLayout, QMessageBox
 )
 from PyQt5.QtCore import QTimer, QThread, pyqtSignal, Qt
-from PyQt5.QtGui import QFont, QPixmap, QImage, QPalette, QColor
+from PyQt5.QtGui import QFont, QPixmap, QImage
 from scipy import signal
 from scipy.io import wavfile
 import pyqtgraph as pg
@@ -22,7 +22,6 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import wave
 import struct
-import qdarkstyle
 
 
 class FakeSerialDevice:
@@ -1042,118 +1041,12 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     
-    # QDarkStyleSheet 적용 <mcreference link="https://github.com/ColinDuquesnoy/QDarkStyleSheet" index="3">3</mcreference>
-    app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
-    
-    # 폰트 설정 - 더 모던한 폰트
-    font = QFont("Segoe UI", 9)  # Windows 10/11 기본 폰트
+    # 폰트 설정
+    font = QFont("Arial", 10)
     app.setFont(font)
-    
-    # 추가 스타일링
-    additional_style = """
-    QMainWindow {
-        background-color: #2b2b2b;
-    }
-    
-    QTabWidget::pane {
-        border: 1px solid #3c3c3c;
-        background-color: #2b2b2b;
-    }
-    
-    QTabBar::tab {
-        background-color: #3c3c3c;
-        color: #ffffff;
-        padding: 8px 16px;
-        margin-right: 2px;
-        border-top-left-radius: 4px;
-        border-top-right-radius: 4px;
-    }
-    
-    QTabBar::tab:selected {
-        background-color: #0078d4;
-        color: #ffffff;
-    }
-    
-    QTabBar::tab:hover {
-        background-color: #404040;
-    }
-    
-    QPushButton {
-        background-color: #0078d4;
-        color: #ffffff;
-        border: none;
-        padding: 8px 16px;
-        border-radius: 4px;
-        font-weight: 500;
-    }
-    
-    QPushButton:hover {
-        background-color: #106ebe;
-    }
-    
-    QPushButton:pressed {
-        background-color: #005a9e;
-    }
-    
-    QPushButton:disabled {
-        background-color: #404040;
-        color: #808080;
-    }
-    
-    QGroupBox {
-        font-weight: 600;
-        border: 2px solid #3c3c3c;
-        border-radius: 6px;
-        margin-top: 1ex;
-        padding-top: 10px;
-    }
-    
-    QGroupBox::title {
-        subcontrol-origin: margin;
-        left: 10px;
-        padding: 0 8px 0 8px;
-        color: #ffffff;
-    }
-    
-    QProgressBar {
-        border: 1px solid #3c3c3c;
-        border-radius: 4px;
-        text-align: center;
-        background-color: #2b2b2b;
-    }
-    
-    QProgressBar::chunk {
-        background-color: #0078d4;
-        border-radius: 3px;
-    }
-    
-    QSlider::groove:horizontal {
-        border: 1px solid #3c3c3c;
-        height: 6px;
-        background: #2b2b2b;
-        border-radius: 3px;
-    }
-    
-    QSlider::handle:horizontal {
-        background: #0078d4;
-        border: 1px solid #0078d4;
-        width: 16px;
-        margin: -6px 0;
-        border-radius: 8px;
-    }
-    
-    QSlider::handle:horizontal:hover {
-        background: #106ebe;
-    }
-    """
-    
-    # 기존 스타일시트에 추가 스타일 적용
-    current_style = app.styleSheet()
-    app.setStyleSheet(current_style + additional_style)
     
     # 메인 윈도우 생성
     window = MainWindow()
-    window.setWindowTitle("Audio & Camera Analysis Tool - Modern UI")
     window.show()
     
     sys.exit(app.exec_())
