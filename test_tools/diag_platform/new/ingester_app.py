@@ -8,6 +8,7 @@ from PyQt5.QtCore import *
 from backend import DataManager
 from concurrent.futures import ProcessPoolExecutor, as_completed # [필수 추가]
 
+
 # ==========================================
 # [중요] 멀티프로세싱용 작업 함수 (클래스 밖 전역 함수로 빼야 함)
 # ==========================================

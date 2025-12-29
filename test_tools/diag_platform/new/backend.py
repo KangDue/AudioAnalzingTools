@@ -24,7 +24,7 @@ class DataManager:
                     names.append(f"{ch}_{m}_{b}")
         return names
 
-    # [신규] DB 연결 해제 (Ingester 초기화 시 필요)
+    # DB 연결 해제
     def close_db(self):
         if self.conn:
             self.conn.close()
@@ -76,6 +76,95 @@ class DataManager:
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_label_top ON noise_data (label_top);")
         self.conn.commit()
 
+    # [수정됨] 오토 라벨링 적용 시: Top 라벨 유무를 체크하여 Status 결정
+    def update_labels_from_dict(self, update_map, target_col):
+        if not update_map: return 0
+        
+        try:
+            self.conn.execute("BEGIN TRANSACTION")
+            
+            data_to_update = [(lbl, uid) for uid, lbl in update_map.items()]
+            
+            # 1. 타겟 컬럼(Mid or Bot) 업데이트
+            query = f"UPDATE noise_data SET {target_col} = ? WHERE id = ?"
+            self.cursor.executemany(query, data_to_update)
+            
+            # 2. Status 동기화 (Top 라벨이 있을 때만 Labeled=1)
+            # 업데이트된 ID들에 대해서만 상태 재계산
+            placeholders = ','.join(['?'] * len(update_map))
+            sync_query = f"""
+                UPDATE noise_data 
+                SET is_labeled = CASE 
+                    WHEN label_top IS NOT NULL AND label_top != '' THEN 1 
+                    ELSE 0 
+                END
+                WHERE id IN ({placeholders})
+            """
+            self.cursor.execute(sync_query, list(update_map.keys()))
+            
+            self.conn.commit()
+            return len(data_to_update)
+        except Exception as e:
+            print(f"Batch Dict Update Error: {e}")
+            if self.conn: self.conn.rollback()
+            return 0
+
+    # [수정됨] Save & Next 저장 시: 파이썬 로직 대신 SQL 조건으로 판단
+    def update_labels(self, uid, t, m, b):
+        try:
+            # Top 라벨이 비어있지 않아야 Labeled(1)
+            is_labeled = 1 if (t and t.strip()) else 0
+            
+            self.cursor.execute("""
+                UPDATE noise_data 
+                SET label_top=?, label_mid=?, label_bot=?, is_labeled=? 
+                WHERE id=?
+            """, (t, m, b, is_labeled, uid))
+            self.conn.commit()
+            return True
+        except: return False
+
+    # [수정됨] 단일 수정 시: Status 로직 강화
+    def update_single_label(self, uid, col_name, value):
+        try:
+            if not value or value.strip() == "": value = None
+            query = f"UPDATE noise_data SET {col_name} = ? WHERE id = ?"
+            self.cursor.execute(query, (value, uid))
+            
+            # Top 라벨 상태 확인 후 Status 업데이트
+            self.cursor.execute("""
+                UPDATE noise_data 
+                SET is_labeled = CASE 
+                    WHEN label_top IS NOT NULL AND label_top != '' THEN 1 
+                    ELSE 0 
+                END 
+                WHERE id = ?
+            """, (uid,))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Single Update Error: {e}")
+            return False
+
+    # [수정됨] 라벨 삭제 시: Top이 지워지거나 비어있으면 Unlabeled
+    def remove_label_from_records(self, col_name, label_value):
+        try:
+            query = f"UPDATE noise_data SET {col_name} = NULL WHERE {col_name} = ?"
+            self.cursor.execute(query, (label_value,))
+            
+            # Top이 NULL이거나 빈 문자열이면 Status = 0
+            self.cursor.execute("""
+                UPDATE noise_data 
+                SET is_labeled = 0 
+                WHERE label_top IS NULL OR label_top = ''
+            """)
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Delete Label Error: {e}")
+            return False
+
+    # --- 아래는 기존과 동일 ---
     def rename_label(self, category, col_name, old_name, new_name):
         try:
             self.cursor.execute("UPDATE label_settings SET name = ? WHERE category = ? AND name = ?", 
@@ -106,7 +195,9 @@ class DataManager:
             
             if not set_clauses: return 0
 
-            if top: set_clauses.append("is_labeled = 1")
+            # Top이 업데이트 목록에 있으면 Status=1, 없으면 기존 상태 유지(건드리지 않음)
+            if top:
+                set_clauses.append("is_labeled = 1")
 
             query = f"UPDATE noise_data SET {', '.join(set_clauses)} {where_clause}"
             full_params = update_params + params
@@ -118,17 +209,6 @@ class DataManager:
         except Exception as e:
             print(f"Bulk Update Error: {e}")
             return -1
-
-    def remove_label_from_records(self, col_name, label_value):
-        try:
-            query = f"UPDATE noise_data SET {col_name} = NULL WHERE {col_name} = ?"
-            self.cursor.execute(query, (label_value,))
-            self.cursor.execute("UPDATE noise_data SET is_labeled = 0 WHERE label_top IS NULL")
-            self.conn.commit()
-            return True
-        except Exception as e:
-            print(f"Delete Label Error: {e}")
-            return False
 
     def fetch_label_settings(self, category):
         try:
@@ -157,18 +237,6 @@ class DataManager:
                 self.cursor.executemany("INSERT INTO label_settings (category, name, ord) VALUES (?, ?, ?)", data)
         self.conn.commit()
 
-    def update_single_label(self, uid, col_name, value):
-        try:
-            if not value or value.strip() == "": value = None
-            query = f"UPDATE noise_data SET {col_name} = ? WHERE id = ?"
-            self.cursor.execute(query, (value, uid))
-            self.cursor.execute("UPDATE noise_data SET is_labeled = CASE WHEN label_top IS NOT NULL AND label_top != '' THEN 1 ELSE 0 END WHERE id = ?", (uid,))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            print(f"Single Update Error: {e}")
-            return False
-
     def ensure_label_exists(self, category, label_name):
         if not label_name: return False
         try:
@@ -193,14 +261,12 @@ class DataManager:
                   meta['duration'], meta['sr']))
             
             with h5py.File(self.h5_path, 'a') as h5f:
-                if 'global_feat_names' not in h5f.attrs:
-                    pass 
-                
+                if 'global_feat_names' not in h5f.attrs: pass 
                 if meta['id'] in h5f: del h5f[meta['id']]
                 grp = h5f.create_group(meta['id'])
                 raw_grp = grp.create_group('raw')
                 for ch, data in raw_data.items():
-                    raw_grp.create_dataset(ch, data=data, compression="gzip", compression_opts=4)
+                    raw_grp.create_dataset(ch, data=data, compression="lzf") # lzf 권장
                 grp.create_dataset('feature', data=feat_array)
             
             self.conn.commit()
@@ -208,6 +274,46 @@ class DataManager:
         except Exception:
             if self.conn: self.conn.rollback()
             return False
+
+    # [최적화] 대량 입력용 함수 (Ingester에서 사용)
+    def insert_batch_records(self, records):
+        if not records: return True
+        try:
+            self.conn.execute("BEGIN TRANSACTION")
+            sql_data = []
+            for meta, _, _ in records:
+                sql_data.append((
+                    meta['id'], meta['filename'], meta['path'], 
+                    meta['year'], meta['month'], meta['day'], meta['serial'],
+                    meta['duration'], meta['sr']
+                ))
+            self.cursor.executemany("""
+                INSERT INTO noise_data (id, filename, file_path, year, month, day, serial, duration, sample_rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, sql_data)
+            
+            with h5py.File(self.h5_path, 'a') as h5f:
+                if 'global_feat_names' not in h5f.attrs: pass 
+                for meta, raw_data, feat_array in records:
+                    uid = meta['id']
+                    if uid in h5f: del h5f[uid]
+                    grp = h5f.create_group(uid)
+                    raw_grp = grp.create_group('raw')
+                    for ch, data in raw_data.items():
+                        raw_grp.create_dataset(ch, data=data, compression="lzf")
+                    grp.create_dataset('feature', data=feat_array)
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Batch Insert Error: {e}")
+            if self.conn: self.conn.rollback()
+            return False
+
+    def get_all_existing_ids(self):
+        if not self.cursor: return set()
+        self.cursor.execute("SELECT id FROM noise_data")
+        return set(row[0] for row in self.cursor.fetchall())
 
     def get_signal_data(self, unique_id):
         try:
@@ -223,6 +329,28 @@ class DataManager:
                 return raw_data, feat_array, feat_names
         except Exception:
             return None, None, None
+
+    def get_filtered_ids(self, filters, logic="AND"):
+        w, p = self._build_query(filters, logic)
+        self.cursor.execute(f"SELECT id FROM noise_data {w}", p)
+        return [r[0] for r in self.cursor.fetchall()]
+
+    def get_features_for_clustering(self, id_list):
+        if not id_list: return None, None
+        features = []
+        valid_ids = []
+        try:
+            with h5py.File(self.h5_path, 'r') as h5f:
+                for uid in id_list:
+                    if uid in h5f and 'feature' in h5f[uid]:
+                        feat = h5f[uid]['feature'][:]
+                        features.append(feat)
+                        valid_ids.append(uid)
+            if not features: return None, None
+            return np.array(features), valid_ids
+        except Exception as e:
+            print(f"Feature Load Error: {e}")
+            return None, None
 
     def export_training_data(self, output_path):
         self.cursor.execute("SELECT id, label_bot, label_mid, label_top FROM noise_data WHERE is_labeled=1")
@@ -300,13 +428,6 @@ class DataManager:
         self.cursor.execute(f"SELECT id FROM noise_data WHERE {col} = ? LIMIT ?", (val, limit))
         return [r[0] for r in self.cursor.fetchall()]
 
-    def update_labels(self, uid, t, m, b):
-        try:
-            self.cursor.execute("UPDATE noise_data SET label_top=?, label_mid=?, label_bot=?, is_labeled=1 WHERE id=?", (t, m, b, uid))
-            self.conn.commit()
-            return True
-        except: return False
-
     def get_label_stats(self):
         s = {}
         if not self.cursor: return s
@@ -316,66 +437,3 @@ class DataManager:
                 s[c] = dict(self.cursor.fetchall())
             except: s[c] = {}
         return s
-    # backend.py의 DataManager 클래스 안에 아래 메서드들을 추가/수정하세요.
-
-    # [신규] 성능 최적화: 이미 존재하는 모든 ID를 한 번에 가져오기 (Set으로 반환)
-    def get_all_existing_ids(self):
-        if not self.cursor: return set()
-        self.cursor.execute("SELECT id FROM noise_data")
-        return set(row[0] for row in self.cursor.fetchall())
-
-    # [신규] 성능 최적화: 배치 단위(묶음) 저장 함수
-    def insert_batch_records(self, records):
-        # records 구조: [(meta, raw_data, feat_array), ...]
-        if not records: return True
-        
-        try:
-            # 1. SQLite 트랜잭션 시작 (이거 안 하면 500번 쓸 때마다 저장해서 느림)
-            self.conn.execute("BEGIN TRANSACTION")
-            
-            sql_data = []
-            for meta, _, _ in records:
-                sql_data.append((
-                    meta['id'], meta['filename'], meta['path'], 
-                    meta['year'], meta['month'], meta['day'], meta['serial'],
-                    meta['duration'], meta['sr']
-                ))
-            
-            # 2. SQLite 대량 Insert (executemany 사용)
-            self.cursor.executemany("""
-                INSERT INTO noise_data (id, filename, file_path, year, month, day, serial, duration, sample_rate)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, sql_data)
-            
-            # 3. HDF5 대량 Insert (파일을 한 번만 열어서 모두 기록)
-            with h5py.File(self.h5_path, 'a') as h5f:
-                # 전역 속성 체크 (최초 1회만)
-                if 'global_feat_names' not in h5f.attrs:
-                    pass 
-                
-                for meta, raw_data, feat_array in records:
-                    uid = meta['id']
-                    # 혹시 쓰다가 에러나서 찌꺼기 남았으면 삭제
-                    if uid in h5f: del h5f[uid]
-                    
-                    grp = h5f.create_group(uid)
-                    
-                    # Raw 저장
-                    raw_grp = grp.create_group('raw')
-                    for ch, data in raw_data.items():
-                        raw_grp.create_dataset(ch, data=data, compression="gzip", compression_opts=4)
-                    
-                    # Feature 저장
-                    grp.create_dataset('feature', data=feat_array)
-            
-            # 4. 최종 Commit (이때 디스크에 실제로 써짐)
-            self.conn.commit()
-            return True
-            
-        except Exception as e:
-            print(f"Batch Insert Error: {e}")
-            if self.conn: self.conn.rollback()
-            return False
-
-    # 기존 insert_record는 단건 처리용으로 유지하거나 삭제해도 무방하지만,
-    # 호환성을 위해 놔두셔도 됩니다. 위 두 함수만 추가하면 됩니다.

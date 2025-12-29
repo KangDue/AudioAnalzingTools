@@ -14,6 +14,13 @@ from scipy import signal
 import numpy as np
 from backend import DataManager
 
+
+# ... 기존 import 아래에 추가 ...
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+
+
 class LabelerApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -47,6 +54,200 @@ class LabelerApp(QMainWindow):
             QSplitter::handle { background-color: #444; }
             QSplitter::handle:hover { background-color: #0078D7; }
         """)
+
+class ClusteringDialog(QDialog):
+    def __init__(self, parent=None, db_manager=None, filtered_ids=None):
+        super().__init__(parent)
+        self.setWindowTitle("Auto Labeling (Clustering)")
+        self.resize(500, 600)
+        self.db = db_manager
+        self.target_ids = filtered_ids
+        self.generated_labels = {} # {id: new_label}
+        
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # 1. Info
+        info_grp = QGroupBox("Target Data Info")
+        info_layout = QVBoxLayout()
+        self.lbl_count = QLabel(f"Target Items: {len(self.target_ids)} items (Filtered Results)")
+        info_layout.addWidget(self.lbl_count)
+        info_grp.setLayout(info_layout)
+        layout.addWidget(info_grp)
+        
+        # 2. Algorithm Settings
+        algo_grp = QGroupBox("Clustering Algorithm")
+        algo_layout = QFormLayout()
+        
+        self.combo_algo = QComboBox()
+        self.combo_algo.addItems(["K-Means", "DBSCAN", "Agglomerative (Hierarchical)"])
+        self.combo_algo.currentIndexChanged.connect(self.update_param_ui)
+        
+        self.spin_param1 = QSpinBox() # Clusters or Epsilon
+        self.spin_param2 = QSpinBox() # Min Samples (for DBSCAN)
+        self.lbl_param1 = QLabel("Number of Clusters (k):")
+        self.lbl_param2 = QLabel("Min Samples:")
+        
+        algo_layout.addRow("Algorithm:", self.combo_algo)
+        algo_layout.addRow(self.lbl_param1, self.spin_param1)
+        algo_layout.addRow(self.lbl_param2, self.spin_param2)
+        
+        algo_grp.setLayout(algo_layout)
+        layout.addWidget(algo_grp)
+        
+        # 3. Labeling Strategy
+        lbl_grp = QGroupBox("Labeling Strategy")
+        lbl_layout = QFormLayout()
+        
+        self.combo_target = QComboBox()
+        self.combo_target.addItems(["label_mid", "label_bot"]) # Top은 보통 명확해서 자동화 위험
+        
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(["Overwrite (Replace)", "Append (+)", "Custom Name + Cluster ID"])
+        
+        self.txt_custom = QLineEdit()
+        self.txt_custom.setPlaceholderText("e.g. Group_")
+        
+        lbl_layout.addRow("Target Column:", self.combo_target)
+        lbl_layout.addRow("Naming Mode:", self.combo_mode)
+        lbl_layout.addRow("Custom Prefix:", self.txt_custom)
+        
+        lbl_grp.setLayout(lbl_layout)
+        layout.addWidget(lbl_grp)
+        
+        # 4. Action
+        btn_layout = QHBoxLayout()
+        self.btn_run = QPushButton("▶ Run Clustering & Apply")
+        self.btn_run.setFixedHeight(40)
+        self.btn_run.setStyleSheet("background-color: #007ACC; color: white; font-weight: bold;")
+        self.btn_run.clicked.connect(self.run_clustering)
+        
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(self.btn_run)
+        btn_layout.addWidget(self.btn_cancel)
+        layout.addLayout(btn_layout)
+        
+        # 초기 UI 설정
+        self.update_param_ui()
+
+    def update_param_ui(self):
+        algo = self.combo_algo.currentText()
+        if algo == "K-Means" or algo == "Agglomerative (Hierarchical)":
+            self.lbl_param1.setText("Number of Clusters (k):")
+            self.spin_param1.setRange(2, 50)
+            self.spin_param1.setValue(5)
+            self.lbl_param2.setVisible(False)
+            self.spin_param2.setVisible(False)
+        elif algo == "DBSCAN":
+            self.lbl_param1.setText("Epsilon (distance):")
+            self.spin_param1.setRange(1, 1000) # Scaled distance assumed
+            self.spin_param1.setValue(5) # Default eps (needs tuning based on scaling)
+            
+            self.lbl_param2.setVisible(True)
+            self.spin_param2.setVisible(True)
+            self.lbl_param2.setText("Min Samples:")
+            self.spin_param2.setRange(2, 50)
+            self.spin_param2.setValue(5)
+
+    def run_clustering(self):
+        if not self.target_ids:
+            QMessageBox.warning(self, "Error", "No data to cluster.")
+            return
+
+        self.btn_run.setEnabled(False)
+        self.btn_run.setText("Loading Data & Processing...")
+        QApplication.processEvents() # UI 갱신
+        
+        try:
+            # 1. Feature Load
+            X, valid_ids = self.db.get_features_for_clustering(self.target_ids)
+            if X is None or len(X) == 0:
+                raise Exception("Failed to load features. Ensure H5 file exists.")
+            
+            # 2. Preprocessing (Impute & Scale)
+            # 결측치(NaN)가 있으면 평균으로 채움
+            imputer = SimpleImputer(strategy='mean')
+            X = imputer.fit_transform(X)
+            
+            # 스케일링 (매우 중요: SPL은 60~90인데 계수는 0~1이면 거리 계산 망함)
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
+            
+            # 3. Clustering
+            algo_name = self.combo_algo.currentText()
+            labels = []
+            
+            if algo_name == "K-Means":
+                k = self.spin_param1.value()
+                model = KMeans(n_clusters=k, random_state=42, n_init='auto')
+                labels = model.fit_predict(X_scaled)
+                
+            elif algo_name == "DBSCAN":
+                # DBSCAN의 eps는 데이터 분포에 민감함. UI에서 받은 값은 정수지만 여기선 0.1 곱해서 미세조정 가정
+                eps = self.spin_param1.value() * 0.1 
+                min_samples = self.spin_param2.value()
+                model = DBSCAN(eps=eps, min_samples=min_samples)
+                labels = model.fit_predict(X_scaled)
+                
+            elif algo_name == "Agglomerative (Hierarchical)":
+                k = self.spin_param1.value()
+                model = AgglomerativeClustering(n_clusters=k)
+                labels = model.fit_predict(X_scaled)
+            
+            # 4. Generate New Labels
+            target_col = self.combo_target.currentText()
+            mode = self.combo_mode.currentText()
+            prefix = self.txt_custom.text().strip()
+            
+            update_map = {} # {id: new_label_text}
+            
+            # 기존 라벨 정보를 가져와야 하는 경우 (Append 모드)
+            existing_labels = {}
+            if "Append" in mode:
+                # 쿼리로 현재 라벨 가져오기
+                self.db.cursor.execute(f"SELECT id, {target_col} FROM noise_data WHERE id IN ({','.join(['?']*len(valid_ids))})", valid_ids)
+                existing_labels = dict(self.db.cursor.fetchall())
+
+            for uid, cluster_id in zip(valid_ids, labels):
+                cluster_str = f"C{cluster_id}" if cluster_id != -1 else "Noise" # DBSCAN -1 is noise
+                new_val = ""
+                
+                if "Custom Name" in mode:
+                    if prefix: new_val = f"{prefix}_{cluster_str}"
+                    else: new_val = f"Auto_{cluster_str}"
+                elif "Append" in mode:
+                    old_val = existing_labels.get(uid, "")
+                    if old_val and old_val != "None":
+                        new_val = f"{old_val}+{cluster_str}"
+                    else:
+                        new_val = cluster_str
+                else: # Overwrite
+                    new_val = f"Cluster_{cluster_str}"
+                
+                update_map[uid] = new_val
+            
+            # 5. DB Update
+            updated_count = self.db.update_labels_from_dict(update_map, target_col)
+            
+            # 6. Auto-Add new labels to settings (backend logic handles this? No, we need explicit add)
+            # 새로 생긴 라벨들을 label_settings에 등록
+            unique_new_labels = set(update_map.values())
+            category_key = 'mid' if target_col == 'label_mid' else 'bot'
+            for lbl in unique_new_labels:
+                self.db.ensure_label_exists(category_key, lbl)
+            
+            QMessageBox.information(self, "Success", f"Clustering Completed.\nAlgorithm: {algo_name}\nUpdated Items: {updated_count}")
+            self.accept() # 다이얼로그 닫기
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+            self.btn_run.setText("▶ Run Clustering & Apply")
+            self.btn_run.setEnabled(True)
 
 class DataLabelerTab(QWidget):
     def __init__(self, db_manager):
@@ -112,7 +313,14 @@ class DataLabelerTab(QWidget):
         logic_layout.addWidget(self.rb_and); logic_layout.addWidget(self.rb_or)
         search_grid.addLayout(logic_layout, 6, 0, 1, 2)
         self.btn_search = QPushButton("🔍 Apply Filter"); self.btn_search.clicked.connect(self.reset_and_load)
-        search_grid.addWidget(self.btn_search, 7, 0, 1, 2)
+        search_grid.addWidget(self.btn_search, 7, 0, 1, 1)#7, 0, 1, 2
+        
+        # [신규] 오토 라벨링 버튼 추가
+        self.btn_auto = QPushButton("🤖 Auto Label (Clustering)")
+        self.btn_auto.setStyleSheet("background-color: #673AB7; color: white; font-weight: bold;")
+        self.btn_auto.clicked.connect(self.open_clustering_dialog)
+        search_grid.addWidget(self.btn_auto, 7, 1, 1, 1)   # 옆에 배치
+        
         search_grp.setLayout(search_grid); z1_layout.addWidget(search_grp)
 
         self.table = QTableWidget(); self.table.setColumnCount(5)
@@ -578,6 +786,26 @@ class DataLabelerTab(QWidget):
                 QMessageBox.information(self, "Success", f"Exported {count} items.\n{fname}")
             except Exception as e: QMessageBox.critical(self, "Error", str(e))
 
+    # [신규] 클러스터링 다이얼로그 열기
+    def open_clustering_dialog(self):
+        if not self.db.conn: return
+        
+        # 현재 필터 조건에 맞는 모든 ID 가져오기
+        opts = self.get_filter_opts()
+        logic = self.get_logic_operator()
+        filtered_ids = self.db.get_filtered_ids(opts, logic)
+        
+        if not filtered_ids:
+            QMessageBox.warning(self, "Warning", "No data found with current filters.")
+            return
+            
+        dlg = ClusteringDialog(self, self.db, filtered_ids)
+        if dlg.exec_() == QDialog.Accepted:
+            # 작업 완료 후 리스트 및 통계 갱신
+            self.load_labels_from_db() # 새 라벨이 생겼을 수 있으므로
+            self.refresh_stats()
+            self.load_list()
+            
 if __name__ == "__main__":
     pg.mkQApp()
     app = QApplication.instance()
