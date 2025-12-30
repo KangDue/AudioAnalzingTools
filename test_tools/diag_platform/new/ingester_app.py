@@ -284,7 +284,18 @@ class IngesterApp(QMainWindow):
     def run_ingestion(self):
         if not self.db_manager.conn:
             default_dir = self.list_targets.item(0).text() if self.list_targets.count() > 0 else ""
-            fname, _ = QFileDialog.getSaveFileName(self, "출력 DB/H5 저장", default_dir, "SQLite DB (*.db)")
+            
+            # [수정] 윈도우 기본 탐색기(Native Dialog) 강제 사용
+            # options 인자를 명시적으로 넘겨주면 OS 기본 대화상자를 우선 사용합니다.
+            options = QFileDialog.Options()
+            
+            fname, _ = QFileDialog.getSaveFileName(
+                self, 
+                "출력 DB/H5 저장 (파일명을 입력하세요)", 
+                default_dir, 
+                "SQLite DB (*.db)", 
+                options=options
+            )
             
             if not fname: return
                 
