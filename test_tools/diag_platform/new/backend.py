@@ -24,7 +24,6 @@ class DataManager:
                     names.append(f"{ch}_{m}_{b}")
         return names
 
-    # DB 연결 해제
     def close_db(self):
         if self.conn:
             self.conn.close()
@@ -76,95 +75,112 @@ class DataManager:
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_label_top ON noise_data (label_top);")
         self.conn.commit()
 
-    # [수정됨] 오토 라벨링 적용 시: Top 라벨 유무를 체크하여 Status 결정
-    def update_labels_from_dict(self, update_map, target_col):
-        if not update_map: return 0
-        
+    # [복구됨] Labeler App에서 그래프 그릴 때 사용하는 필수 함수
+    def get_signal_data(self, unique_id):
+        try:
+            with h5py.File(self.h5_path, 'r') as h5f:
+                if unique_id not in h5f: return None, None, None
+                
+                # Raw Data Read
+                raw_grp = h5f[unique_id]['raw']
+                raw_data = {k: raw_grp[k][:] for k in raw_grp.keys()}
+                
+                # Feature Data Read
+                feat_array = np.array([])
+                feat_names = []
+                
+                if 'feature' in h5f[unique_id]:
+                    feat_array = h5f[unique_id]['feature'][:]
+                    feat_names = self.generate_fixed_names()
+                
+                return raw_data, feat_array, feat_names
+        except Exception:
+            return None, None, None
+
+    # Clustering용 대량 Feature 로드 (Global Matrix 사용)
+    def get_features_for_clustering(self, id_list):
+        if not id_list: return None, None
+        target_ids_set = set(id_list)
+        try:
+            with h5py.File(self.h5_path, 'r') as h5f:
+                if 'global_features' in h5f and 'global_ids' in h5f:
+                    all_feats = h5f['global_features'][:]
+                    all_ids = h5f['global_ids'][:].astype(str)
+                    mask = np.isin(all_ids, list(target_ids_set))
+                    return all_feats[mask], all_ids[mask]
+                else:
+                    # Fallback
+                    features = []; valid_ids = []
+                    for uid in id_list:
+                        if uid in h5f and 'feature' in h5f[uid]:
+                            features.append(h5f[uid]['feature'][:])
+                            valid_ids.append(uid)
+                    if not features: return None, None
+                    return np.array(features), valid_ids
+        except Exception as e:
+            print(f"Feature Load Error: {e}")
+            return None, None
+
+    # Ingester용 배치 저장
+    def insert_batch_records(self, records):
+        if not records: return True
         try:
             self.conn.execute("BEGIN TRANSACTION")
+            sql_data = []
+            new_feats_list = []
+            new_ids_list = []
             
-            data_to_update = [(lbl, uid) for uid, lbl in update_map.items()]
+            for meta, raw_data, feat_array in records:
+                sql_data.append((
+                    meta['id'], meta['filename'], meta['path'], 
+                    meta['year'], meta['month'], meta['day'], meta['serial'],
+                    meta['duration'], meta['sr']
+                ))
+                new_feats_list.append(feat_array)
+                new_ids_list.append(meta['id'])
+
+            self.cursor.executemany("""
+                INSERT INTO noise_data (id, filename, file_path, year, month, day, serial, duration, sample_rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, sql_data)
             
-            # 1. 타겟 컬럼(Mid or Bot) 업데이트
-            query = f"UPDATE noise_data SET {target_col} = ? WHERE id = ?"
-            self.cursor.executemany(query, data_to_update)
-            
-            # 2. Status 동기화 (Top 라벨이 있을 때만 Labeled=1)
-            # 업데이트된 ID들에 대해서만 상태 재계산
-            placeholders = ','.join(['?'] * len(update_map))
-            sync_query = f"""
-                UPDATE noise_data 
-                SET is_labeled = CASE 
-                    WHEN label_top IS NOT NULL AND label_top != '' THEN 1 
-                    ELSE 0 
-                END
-                WHERE id IN ({placeholders})
-            """
-            self.cursor.execute(sync_query, list(update_map.keys()))
+            with h5py.File(self.h5_path, 'a') as h5f:
+                if 'global_feat_names' not in h5f.attrs: pass 
+                
+                # 개별 저장
+                for meta, raw_data, feat_array in records:
+                    uid = meta['id']
+                    if uid in h5f: del h5f[uid]
+                    grp = h5f.create_group(uid)
+                    raw_grp = grp.create_group('raw')
+                    for ch, data in raw_data.items():
+                        raw_grp.create_dataset(ch, data=data, compression="lzf")
+                    grp.create_dataset('feature', data=feat_array)
+                
+                # Global Matrix 저장
+                num_features = len(new_feats_list[0])
+                if 'global_features' not in h5f:
+                    h5f.create_dataset('global_features', shape=(0, num_features), maxshape=(None, num_features), dtype='f4')
+                    dt_str = h5py.special_dtype(vlen=str)
+                    h5f.create_dataset('global_ids', shape=(0,), maxshape=(None,), dtype=dt_str)
+                
+                dset_feat = h5f['global_features']
+                dset_ids = h5f['global_ids']
+                curr_len = dset_feat.shape[0]
+                add_len = len(new_feats_list)
+                
+                dset_feat.resize((curr_len + add_len, num_features))
+                dset_ids.resize((curr_len + add_len,))
+                dset_feat[curr_len:] = np.array(new_feats_list, dtype=np.float32)
+                dset_ids[curr_len:] = np.array(new_ids_list)
             
             self.conn.commit()
-            return len(data_to_update)
+            return True
         except Exception as e:
-            print(f"Batch Dict Update Error: {e}")
+            print(f"Batch Insert Error: {e}")
             if self.conn: self.conn.rollback()
-            return 0
-
-    # [수정됨] Save & Next 저장 시: 파이썬 로직 대신 SQL 조건으로 판단
-    def update_labels(self, uid, t, m, b):
-        try:
-            # Top 라벨이 비어있지 않아야 Labeled(1)
-            is_labeled = 1 if (t and t.strip()) else 0
-            
-            self.cursor.execute("""
-                UPDATE noise_data 
-                SET label_top=?, label_mid=?, label_bot=?, is_labeled=? 
-                WHERE id=?
-            """, (t, m, b, is_labeled, uid))
-            self.conn.commit()
-            return True
-        except: return False
-
-    # [수정됨] 단일 수정 시: Status 로직 강화
-    def update_single_label(self, uid, col_name, value):
-        try:
-            if not value or value.strip() == "": value = None
-            query = f"UPDATE noise_data SET {col_name} = ? WHERE id = ?"
-            self.cursor.execute(query, (value, uid))
-            
-            # Top 라벨 상태 확인 후 Status 업데이트
-            self.cursor.execute("""
-                UPDATE noise_data 
-                SET is_labeled = CASE 
-                    WHEN label_top IS NOT NULL AND label_top != '' THEN 1 
-                    ELSE 0 
-                END 
-                WHERE id = ?
-            """, (uid,))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            print(f"Single Update Error: {e}")
             return False
 
-    # [수정됨] 라벨 삭제 시: Top이 지워지거나 비어있으면 Unlabeled
-    def remove_label_from_records(self, col_name, label_value):
-        try:
-            query = f"UPDATE noise_data SET {col_name} = NULL WHERE {col_name} = ?"
-            self.cursor.execute(query, (label_value,))
-            
-            # Top이 NULL이거나 빈 문자열이면 Status = 0
-            self.cursor.execute("""
-                UPDATE noise_data 
-                SET is_labeled = 0 
-                WHERE label_top IS NULL OR label_top = ''
-            """)
-            self.conn.commit()
-            return True
-        except Exception as e:
-            print(f"Delete Label Error: {e}")
-            return False
-
-    # --- 아래는 기존과 동일 ---
     def rename_label(self, category, col_name, old_name, new_name):
         try:
             self.cursor.execute("UPDATE label_settings SET name = ? WHERE category = ? AND name = ?", 
@@ -184,20 +200,15 @@ class DataManager:
             update_params = []
             
             if top:
-                set_clauses.append("label_top = ?")
-                update_params.append(top)
+                set_clauses.append("label_top = ?"); update_params.append(top)
             if mid and mid != "Unlabeled":
-                set_clauses.append("label_mid = ?")
-                update_params.append(mid)
+                set_clauses.append("label_mid = ?"); update_params.append(mid)
             if bot and bot != "Unlabeled":
-                set_clauses.append("label_bot = ?")
-                update_params.append(bot)
+                set_clauses.append("label_bot = ?"); update_params.append(bot)
             
             if not set_clauses: return 0
 
-            # Top이 업데이트 목록에 있으면 Status=1, 없으면 기존 상태 유지(건드리지 않음)
-            if top:
-                set_clauses.append("is_labeled = 1")
+            if top: set_clauses.append("is_labeled = 1")
 
             query = f"UPDATE noise_data SET {', '.join(set_clauses)} {where_clause}"
             full_params = update_params + params
@@ -209,6 +220,71 @@ class DataManager:
         except Exception as e:
             print(f"Bulk Update Error: {e}")
             return -1
+
+    def remove_label_from_records(self, col_name, label_value):
+        try:
+            query = f"UPDATE noise_data SET {col_name} = NULL WHERE {col_name} = ?"
+            self.cursor.execute(query, (label_value,))
+            self.cursor.execute("UPDATE noise_data SET is_labeled = 0 WHERE label_top IS NULL OR label_top = ''")
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Delete Label Error: {e}")
+            return False
+
+    def update_labels_from_dict(self, update_map, target_col):
+        if not update_map: return 0
+        try:
+            self.conn.execute("BEGIN TRANSACTION")
+            data_to_update = [(lbl, uid) for uid, lbl in update_map.items()]
+            query = f"UPDATE noise_data SET {target_col} = ? WHERE id = ?"
+            self.cursor.executemany(query, data_to_update)
+            
+            # Status 동기화
+            placeholders = ','.join(['?'] * len(update_map))
+            sync_query = f"""
+                UPDATE noise_data 
+                SET is_labeled = CASE 
+                    WHEN label_top IS NOT NULL AND label_top != '' THEN 1 
+                    ELSE 0 
+                END
+                WHERE id IN ({placeholders})
+            """
+            self.cursor.execute(sync_query, list(update_map.keys()))
+            
+            self.conn.commit()
+            return len(data_to_update)
+        except Exception as e:
+            print(f"Batch Dict Update Error: {e}")
+            if self.conn: self.conn.rollback()
+            return 0
+
+    def update_labels(self, uid, t, m, b):
+        try:
+            is_labeled = 1 if (t and t.strip()) else 0
+            self.cursor.execute("UPDATE noise_data SET label_top=?, label_mid=?, label_bot=?, is_labeled=? WHERE id=?", (t, m, b, is_labeled, uid))
+            self.conn.commit()
+            return True
+        except: return False
+
+    def update_single_label(self, uid, col_name, value):
+        try:
+            if not value or value.strip() == "": value = None
+            query = f"UPDATE noise_data SET {col_name} = ? WHERE id = ?"
+            self.cursor.execute(query, (value, uid))
+            self.cursor.execute("""
+                UPDATE noise_data 
+                SET is_labeled = CASE 
+                    WHEN label_top IS NOT NULL AND label_top != '' THEN 1 
+                    ELSE 0 
+                END 
+                WHERE id = ?
+            """, (uid,))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Single Update Error: {e}")
+            return False
 
     def fetch_label_settings(self, category):
         try:
@@ -252,111 +328,23 @@ class DataManager:
         except: return False
 
     def insert_record(self, meta, raw_data, feat_array):
-        try:
-            self.cursor.execute("""
-                INSERT INTO noise_data (id, filename, file_path, year, month, day, serial, duration, sample_rate)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (meta['id'], meta['filename'], meta['path'], 
-                  meta['year'], meta['month'], meta['day'], meta['serial'],
-                  meta['duration'], meta['sr']))
-            
-            with h5py.File(self.h5_path, 'a') as h5f:
-                if 'global_feat_names' not in h5f.attrs: pass 
-                if meta['id'] in h5f: del h5f[meta['id']]
-                grp = h5f.create_group(meta['id'])
-                raw_grp = grp.create_group('raw')
-                for ch, data in raw_data.items():
-                    raw_grp.create_dataset(ch, data=data, compression="lzf") # lzf 권장
-                grp.create_dataset('feature', data=feat_array)
-            
-            self.conn.commit()
-            return True
-        except Exception:
-            if self.conn: self.conn.rollback()
-            return False
-
-    # [최적화] 대량 입력용 함수 (Ingester에서 사용)
-    def insert_batch_records(self, records):
-        if not records: return True
-        try:
-            self.conn.execute("BEGIN TRANSACTION")
-            sql_data = []
-            for meta, _, _ in records:
-                sql_data.append((
-                    meta['id'], meta['filename'], meta['path'], 
-                    meta['year'], meta['month'], meta['day'], meta['serial'],
-                    meta['duration'], meta['sr']
-                ))
-            self.cursor.executemany("""
-                INSERT INTO noise_data (id, filename, file_path, year, month, day, serial, duration, sample_rate)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, sql_data)
-            
-            with h5py.File(self.h5_path, 'a') as h5f:
-                if 'global_feat_names' not in h5f.attrs: pass 
-                for meta, raw_data, feat_array in records:
-                    uid = meta['id']
-                    if uid in h5f: del h5f[uid]
-                    grp = h5f.create_group(uid)
-                    raw_grp = grp.create_group('raw')
-                    for ch, data in raw_data.items():
-                        raw_grp.create_dataset(ch, data=data, compression="lzf")
-                    grp.create_dataset('feature', data=feat_array)
-            
-            self.conn.commit()
-            return True
-        except Exception as e:
-            print(f"Batch Insert Error: {e}")
-            if self.conn: self.conn.rollback()
-            return False
+        # 단건도 Matrix 호환성을 위해 Batch 함수 사용 권장
+        return self.insert_batch_records([(meta, raw_data, feat_array)])
 
     def get_all_existing_ids(self):
         if not self.cursor: return set()
         self.cursor.execute("SELECT id FROM noise_data")
         return set(row[0] for row in self.cursor.fetchall())
 
-    def get_signal_data(self, unique_id):
-        try:
-            with h5py.File(self.h5_path, 'r') as h5f:
-                if unique_id not in h5f: return None, None, None
-                raw_grp = h5f[unique_id]['raw']
-                raw_data = {k: raw_grp[k][:] for k in raw_grp.keys()}
-                feat_array = np.array([])
-                feat_names = []
-                if 'feature' in h5f[unique_id]:
-                    feat_array = h5f[unique_id]['feature'][:]
-                    feat_names = self.generate_fixed_names()
-                return raw_data, feat_array, feat_names
-        except Exception:
-            return None, None, None
-
     def get_filtered_ids(self, filters, logic="AND"):
         w, p = self._build_query(filters, logic)
         self.cursor.execute(f"SELECT id FROM noise_data {w}", p)
         return [r[0] for r in self.cursor.fetchall()]
 
-    def get_features_for_clustering(self, id_list):
-        if not id_list: return None, None
-        features = []
-        valid_ids = []
-        try:
-            with h5py.File(self.h5_path, 'r') as h5f:
-                for uid in id_list:
-                    if uid in h5f and 'feature' in h5f[uid]:
-                        feat = h5f[uid]['feature'][:]
-                        features.append(feat)
-                        valid_ids.append(uid)
-            if not features: return None, None
-            return np.array(features), valid_ids
-        except Exception as e:
-            print(f"Feature Load Error: {e}")
-            return None, None
-
     def export_training_data(self, output_path):
         self.cursor.execute("SELECT id, label_bot, label_mid, label_top FROM noise_data WHERE is_labeled=1")
         rows = self.cursor.fetchall()
         if not rows: raise Exception("라벨링된 데이터가 없습니다.")
-
         fixed_names = self.generate_fixed_names()
         export_data = []
         if os.path.exists(self.h5_path):
@@ -364,17 +352,16 @@ class DataManager:
                 for row in rows:
                     uid = row['id']
                     if uid not in h5f: continue
+                    # Feature 개별 저장된 것 읽기
                     if 'feature' not in h5f[uid]: continue
                     feats = h5f[uid]['feature'][:]
                     if len(feats) != len(fixed_names): continue
                     row_dict = {"file_id": uid}
-                    for n, v in zip(fixed_names, feats):
-                        row_dict[n] = float(v)
+                    for n, v in zip(fixed_names, feats): row_dict[n] = float(v)
                     row_dict["label_bot"] = row['label_bot']
                     row_dict["label_mid"] = row['label_mid']
                     row_dict["label_top"] = row['label_top']
                     export_data.append(row_dict)
-
         if export_data:
             df = pd.DataFrame(export_data)
             final_cols = ['file_id'] + fixed_names + ['label_bot', 'label_mid', 'label_top']
@@ -382,8 +369,7 @@ class DataManager:
             df = df[final_cols]
             df.to_csv(output_path, index=False, encoding='utf-8-sig')
             return len(df)
-        else:
-            raise Exception("Export할 데이터가 없습니다.")
+        else: raise Exception("Export할 데이터가 없습니다.")
 
     def check_id_exists(self, unique_id):
         if not self.cursor: return False
@@ -391,8 +377,7 @@ class DataManager:
         return self.cursor.fetchone() is not None
 
     def _build_query(self, filters, logic="AND"):
-        conditions = []
-        params = []
+        conditions = []; params = []
         if filters.get('date_from') and filters.get('date_to'):
             try:
                 start_date = int(filters['date_from'].replace('-', ''))
@@ -400,14 +385,11 @@ class DataManager:
                 conditions.append("(year * 10000 + month * 100 + day) BETWEEN ? AND ?")
                 params.extend([start_date, end_date])
             except ValueError: pass
-
         if filters.get('serial'): conditions.append("serial LIKE ?"); params.append(f"%{filters['serial']}%")
         if filters.get('top'): conditions.append("label_top = ?"); params.append(filters['top'])
         if filters.get('mid'): conditions.append("label_mid = ?"); params.append(filters['mid'])
         if filters.get('bot'): conditions.append("label_bot = ?"); params.append(filters['bot'])
-        
         base = f"WHERE ({f' {logic} '.join(conditions)})" if conditions else ""
-        
         if filters.get('status') == 'Labeled': base += (" AND" if base else " WHERE") + " is_labeled = 1"
         elif filters.get('status') == 'Unlabeled': base += (" AND" if base else " WHERE") + " is_labeled = 0"
         return base, params
