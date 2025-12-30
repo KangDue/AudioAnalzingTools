@@ -419,3 +419,32 @@ class DataManager:
                 s[c] = dict(self.cursor.fetchall())
             except: s[c] = {}
         return s
+    
+    # [신규] 필터링된 데이터 영구 삭제 기능
+    def delete_filtered_data(self, filters, logic="AND"):
+        try:
+            # 1. 삭제할 ID 목록 가져오기
+            ids_to_delete = self.get_filtered_ids(filters, logic)
+            if not ids_to_delete: return 0
+            
+            self.conn.execute("BEGIN TRANSACTION")
+            
+            # 2. SQLite에서 삭제
+            w, p = self._build_query(filters, logic)
+            self.cursor.execute(f"DELETE FROM noise_data {w}", p)
+            
+            # 3. HDF5에서 그룹 삭제
+            # (참고: Global Matrix에서는 삭제되지 않고 남아있을 수 있으나, 
+            #  ID가 DB에서 사라지면 조회되지 않으므로 무방함)
+            with h5py.File(self.h5_path, 'a') as h5f:
+                for uid in ids_to_delete:
+                    if uid in h5f:
+                        del h5f[uid]
+            
+            self.conn.commit()
+            return len(ids_to_delete)
+            
+        except Exception as e:
+            print(f"Delete Filtered Error: {e}")
+            if self.conn: self.conn.rollback()
+            return -1

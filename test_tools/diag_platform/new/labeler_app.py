@@ -1,7 +1,7 @@
 import sys
 import os
 
-# [핵심] PyQt5 강제 사용 설정 (PySide6와의 충돌 방지)
+# PyQt5 강제 설정
 os.environ["QT_API"] = "pyqt5"
 
 from PyQt5.QtWidgets import *
@@ -14,12 +14,10 @@ from scipy import signal
 import numpy as np
 from backend import DataManager
 
-
-# ... 기존 import 아래에 추가 ...
+# sklearn import (Auto Label용)
 from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
-
 
 class LabelerApp(QMainWindow):
     def __init__(self):
@@ -50,11 +48,11 @@ class LabelerApp(QMainWindow):
             QMessageBox { background-color: #2b2b2b; }
             QMessageBox QLabel { color: #ffffff; background-color: transparent; }
             QMessageBox QPushButton { min-width: 60px; }
-            /* Splitter Handle 스타일 (잘 보이게) */
             QSplitter::handle { background-color: #444; }
             QSplitter::handle:hover { background-color: #0078D7; }
         """)
 
+# --- Clustering Dialog ---
 class ClusteringDialog(QDialog):
     def __init__(self, parent=None, db_manager=None, filtered_ids=None):
         super().__init__(parent)
@@ -62,15 +60,12 @@ class ClusteringDialog(QDialog):
         self.resize(500, 600)
         self.db = db_manager
         self.target_ids = filtered_ids
-        self.generated_labels = {} # {id: new_label}
-        
         self.init_ui()
         
     def init_ui(self):
         layout = QVBoxLayout()
         self.setLayout(layout)
         
-        # 1. Info
         info_grp = QGroupBox("Target Data Info")
         info_layout = QVBoxLayout()
         self.lbl_count = QLabel(f"Target Items: {len(self.target_ids)} items (Filtered Results)")
@@ -78,172 +73,123 @@ class ClusteringDialog(QDialog):
         info_grp.setLayout(info_layout)
         layout.addWidget(info_grp)
         
-        # 2. Algorithm Settings
         algo_grp = QGroupBox("Clustering Algorithm")
         algo_layout = QFormLayout()
-        
         self.combo_algo = QComboBox()
         self.combo_algo.addItems(["K-Means", "DBSCAN", "Agglomerative (Hierarchical)"])
         self.combo_algo.currentIndexChanged.connect(self.update_param_ui)
-        
-        self.spin_param1 = QSpinBox() # Clusters or Epsilon
-        self.spin_param2 = QSpinBox() # Min Samples (for DBSCAN)
+        self.spin_param1 = QSpinBox()
+        self.spin_param2 = QSpinBox()
         self.lbl_param1 = QLabel("Number of Clusters (k):")
         self.lbl_param2 = QLabel("Min Samples:")
-        
         algo_layout.addRow("Algorithm:", self.combo_algo)
         algo_layout.addRow(self.lbl_param1, self.spin_param1)
         algo_layout.addRow(self.lbl_param2, self.spin_param2)
-        
         algo_grp.setLayout(algo_layout)
         layout.addWidget(algo_grp)
         
-        # 3. Labeling Strategy
         lbl_grp = QGroupBox("Labeling Strategy")
         lbl_layout = QFormLayout()
-        
         self.combo_target = QComboBox()
-        self.combo_target.addItems(["label_mid", "label_bot"]) # Top은 보통 명확해서 자동화 위험
-        
+        self.combo_target.addItems(["label_mid", "label_bot"])
         self.combo_mode = QComboBox()
         self.combo_mode.addItems(["Overwrite (Replace)", "Append (+)", "Custom Name + Cluster ID"])
-        
         self.txt_custom = QLineEdit()
         self.txt_custom.setPlaceholderText("e.g. Group_")
-        
         lbl_layout.addRow("Target Column:", self.combo_target)
         lbl_layout.addRow("Naming Mode:", self.combo_mode)
         lbl_layout.addRow("Custom Prefix:", self.txt_custom)
-        
         lbl_grp.setLayout(lbl_layout)
         layout.addWidget(lbl_grp)
         
-        # 4. Action
         btn_layout = QHBoxLayout()
         self.btn_run = QPushButton("▶ Run Clustering & Apply")
         self.btn_run.setFixedHeight(40)
         self.btn_run.setStyleSheet("background-color: #007ACC; color: white; font-weight: bold;")
         self.btn_run.clicked.connect(self.run_clustering)
-        
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.clicked.connect(self.reject)
-        
         btn_layout.addWidget(self.btn_run)
         btn_layout.addWidget(self.btn_cancel)
         layout.addLayout(btn_layout)
         
-        # 초기 UI 설정
         self.update_param_ui()
 
     def update_param_ui(self):
         algo = self.combo_algo.currentText()
         if algo == "K-Means" or algo == "Agglomerative (Hierarchical)":
             self.lbl_param1.setText("Number of Clusters (k):")
-            self.spin_param1.setRange(2, 50)
-            self.spin_param1.setValue(5)
-            self.lbl_param2.setVisible(False)
-            self.spin_param2.setVisible(False)
+            self.spin_param1.setRange(2, 50); self.spin_param1.setValue(5)
+            self.lbl_param2.setVisible(False); self.spin_param2.setVisible(False)
         elif algo == "DBSCAN":
-            self.lbl_param1.setText("Epsilon (distance):")
-            self.spin_param1.setRange(1, 1000) # Scaled distance assumed
-            self.spin_param1.setValue(5) # Default eps (needs tuning based on scaling)
-            
-            self.lbl_param2.setVisible(True)
-            self.spin_param2.setVisible(True)
+            self.lbl_param1.setText("Epsilon (distance x0.1):")
+            self.spin_param1.setRange(1, 1000); self.spin_param1.setValue(5)
+            self.lbl_param2.setVisible(True); self.spin_param2.setVisible(True)
             self.lbl_param2.setText("Min Samples:")
-            self.spin_param2.setRange(2, 50)
-            self.spin_param2.setValue(5)
+            self.spin_param2.setRange(2, 50); self.spin_param2.setValue(5)
 
     def run_clustering(self):
         if not self.target_ids:
             QMessageBox.warning(self, "Error", "No data to cluster.")
             return
-
         self.btn_run.setEnabled(False)
         self.btn_run.setText("Loading Data & Processing...")
-        QApplication.processEvents() # UI 갱신
+        QApplication.processEvents()
         
         try:
-            # 1. Feature Load
             X, valid_ids = self.db.get_features_for_clustering(self.target_ids)
-            if X is None or len(X) == 0:
-                raise Exception("Failed to load features. Ensure H5 file exists.")
+            if X is None or len(X) == 0: raise Exception("Failed to load features.")
             
-            # 2. Preprocessing (Impute & Scale)
-            # 결측치(NaN)가 있으면 평균으로 채움
             imputer = SimpleImputer(strategy='mean')
             X = imputer.fit_transform(X)
-            
-            # 스케일링 (매우 중요: SPL은 60~90인데 계수는 0~1이면 거리 계산 망함)
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X)
             
-            # 3. Clustering
             algo_name = self.combo_algo.currentText()
             labels = []
-            
             if algo_name == "K-Means":
                 k = self.spin_param1.value()
                 model = KMeans(n_clusters=k, random_state=42, n_init='auto')
                 labels = model.fit_predict(X_scaled)
-                
             elif algo_name == "DBSCAN":
-                # DBSCAN의 eps는 데이터 분포에 민감함. UI에서 받은 값은 정수지만 여기선 0.1 곱해서 미세조정 가정
-                eps = self.spin_param1.value() * 0.1 
+                eps = self.spin_param1.value() * 0.1
                 min_samples = self.spin_param2.value()
                 model = DBSCAN(eps=eps, min_samples=min_samples)
                 labels = model.fit_predict(X_scaled)
-                
             elif algo_name == "Agglomerative (Hierarchical)":
                 k = self.spin_param1.value()
                 model = AgglomerativeClustering(n_clusters=k)
                 labels = model.fit_predict(X_scaled)
             
-            # 4. Generate New Labels
             target_col = self.combo_target.currentText()
             mode = self.combo_mode.currentText()
             prefix = self.txt_custom.text().strip()
             
-            update_map = {} # {id: new_label_text}
-            
-            # 기존 라벨 정보를 가져와야 하는 경우 (Append 모드)
+            update_map = {}
             existing_labels = {}
             if "Append" in mode:
-                # 쿼리로 현재 라벨 가져오기
                 self.db.cursor.execute(f"SELECT id, {target_col} FROM noise_data WHERE id IN ({','.join(['?']*len(valid_ids))})", valid_ids)
                 existing_labels = dict(self.db.cursor.fetchall())
 
             for uid, cluster_id in zip(valid_ids, labels):
-                cluster_str = f"C{cluster_id}" if cluster_id != -1 else "Noise" # DBSCAN -1 is noise
+                cluster_str = f"C{cluster_id}" if cluster_id != -1 else "Noise"
                 new_val = ""
-                
                 if "Custom Name" in mode:
-                    if prefix: new_val = f"{prefix}_{cluster_str}"
-                    else: new_val = f"Auto_{cluster_str}"
+                    new_val = f"{prefix}_{cluster_str}" if prefix else f"Auto_{cluster_str}"
                 elif "Append" in mode:
                     old_val = existing_labels.get(uid, "")
-                    if old_val and old_val != "None":
-                        new_val = f"{old_val}+{cluster_str}"
-                    else:
-                        new_val = cluster_str
-                else: # Overwrite
+                    new_val = f"{old_val}+{cluster_str}" if old_val and old_val != "None" else cluster_str
+                else:
                     new_val = f"Cluster_{cluster_str}"
-                
                 update_map[uid] = new_val
             
-            # 5. DB Update
             updated_count = self.db.update_labels_from_dict(update_map, target_col)
             
-            # 6. Auto-Add new labels to settings (backend logic handles this? No, we need explicit add)
-            # 새로 생긴 라벨들을 label_settings에 등록
-            unique_new_labels = set(update_map.values())
             category_key = 'mid' if target_col == 'label_mid' else 'bot'
-            for lbl in unique_new_labels:
-                self.db.ensure_label_exists(category_key, lbl)
+            for lbl in set(update_map.values()): self.db.ensure_label_exists(category_key, lbl)
             
             QMessageBox.information(self, "Success", f"Clustering Completed.\nAlgorithm: {algo_name}\nUpdated Items: {updated_count}")
-            self.accept() # 다이얼로그 닫기
-            
+            self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
             self.btn_run.setText("▶ Run Clustering & Apply")
@@ -312,15 +258,26 @@ class DataLabelerTab(QWidget):
         self.rb_and = QRadioButton("AND"); self.rb_or = QRadioButton("OR"); self.rb_and.setChecked(True)
         logic_layout.addWidget(self.rb_and); logic_layout.addWidget(self.rb_or)
         search_grid.addLayout(logic_layout, 6, 0, 1, 2)
-        self.btn_search = QPushButton("🔍 Apply Filter"); self.btn_search.clicked.connect(self.reset_and_load)
-        search_grid.addWidget(self.btn_search, 7, 0, 1, 1)#7, 0, 1, 2
         
-        # [신규] 오토 라벨링 버튼 추가
-        self.btn_auto = QPushButton("🤖 Auto Label (Clustering)")
+        # 버튼 영역 (검색, 오토라벨, 삭제)
+        btn_box = QHBoxLayout()
+        self.btn_search = QPushButton("🔍 Apply Filter")
+        self.btn_search.clicked.connect(self.reset_and_load)
+        
+        self.btn_auto = QPushButton("🤖 Auto Label")
         self.btn_auto.setStyleSheet("background-color: #673AB7; color: white; font-weight: bold;")
         self.btn_auto.clicked.connect(self.open_clustering_dialog)
-        search_grid.addWidget(self.btn_auto, 7, 1, 1, 1)   # 옆에 배치
         
+        # [신규] 필터링된 데이터 삭제 버튼
+        self.btn_del_filtered = QPushButton("🗑️ Delete Results")
+        self.btn_del_filtered.setStyleSheet("background-color: #D32F2F; color: white; font-weight: bold;")
+        self.btn_del_filtered.clicked.connect(self.delete_filtered_action)
+        
+        btn_box.addWidget(self.btn_search, 2)
+        btn_box.addWidget(self.btn_auto, 2)
+        btn_box.addWidget(self.btn_del_filtered, 1)
+        
+        search_grid.addLayout(btn_box, 7, 0, 1, 2)
         search_grp.setLayout(search_grid); z1_layout.addWidget(search_grp)
 
         self.table = QTableWidget(); self.table.setColumnCount(5)
@@ -371,7 +328,6 @@ class DataLabelerTab(QWidget):
         saved_cmap = self.settings.value("colormap", "inferno", type=str)
         self.combo_cmap.setCurrentText(saved_cmap)
         self.combo_cmap.currentTextChanged.connect(self.on_setting_changed)
-        
         lbl_min = QLabel("Min Hz:")
         self.spin_min = QSpinBox(); self.spin_min.setRange(0, 25600); self.spin_min.setSingleStep(100); self.spin_min.setSuffix(" Hz")
         lbl_max = QLabel("Max Hz:")
@@ -379,7 +335,6 @@ class DataLabelerTab(QWidget):
         self.spin_min.setValue(self.settings.value("min_freq", 0, type=int))
         self.spin_max.setValue(self.settings.value("max_freq", 25600, type=int))
         self.spin_min.valueChanged.connect(self.on_setting_changed); self.spin_max.valueChanged.connect(self.on_setting_changed)
-
         self.btn_feat = QPushButton("View Feature"); self.btn_feat.clicked.connect(self.show_feature_popup)
         ctrl_layout2.addWidget(self.chk_sync); ctrl_layout2.addSpacing(10); ctrl_layout2.addWidget(lbl_cmap); ctrl_layout2.addWidget(self.combo_cmap)
         ctrl_layout2.addSpacing(10); ctrl_layout2.addWidget(lbl_min); ctrl_layout2.addWidget(self.spin_min); ctrl_layout2.addWidget(lbl_max); ctrl_layout2.addWidget(self.spin_max)
@@ -396,17 +351,14 @@ class DataLabelerTab(QWidget):
         z2_layout.addWidget(self.scroll_area)
         self.zone2.setLayout(z2_layout)
 
-        # --- Zone 3,4,5: Labels (with Splitter) ---
+        # --- Zone 3,4,5: Labels (Splitter) ---
         self.zone_labels = QWidget()
         label_layout = QHBoxLayout()
         self.zone_labels.setLayout(label_layout)
         
         def create_label_zone(title, label_col, category_key):
             grp = QGroupBox(title)
-            main_v = QVBoxLayout() # 그룹박스 메인 레이아웃
-            grp.setLayout(main_v)
-            
-            # 1. 상단 버튼 (고정)
+            main_v = QVBoxLayout(); grp.setLayout(main_v)
             btn_box = QHBoxLayout()
             btn_add = QPushButton("➕"); btn_add.setToolTip("Add Label")
             btn_edit = QPushButton("✎"); btn_edit.setToolTip("Rename Label")
@@ -414,45 +366,21 @@ class DataLabelerTab(QWidget):
             for b in [btn_add, btn_edit, btn_del]: b.setFixedWidth(40)
             btn_box.addWidget(btn_add); btn_box.addWidget(btn_edit); btn_box.addWidget(btn_del)
             main_v.addLayout(btn_box)
-
-            # 2. 스플리터 (Vertical)
             splitter = QSplitter(Qt.Vertical)
-            
-            # 2-1. 라벨 리스트 (위)
-            lst = QListWidget()
-            lst.setDragDropMode(QAbstractItemView.InternalMove)
-            # [중요] 고정 높이 제거
+            lst = QListWidget(); lst.setDragDropMode(QAbstractItemView.InternalMove)
             splitter.addWidget(lst) 
-            
-            # 2-2. 미리보기 영역 (아래) - 컨테이너 위젯으로 묶음
-            preview_container = QWidget()
-            preview_layout = QVBoxLayout()
-            preview_layout.setContentsMargins(0, 0, 0, 0)
-            
-            lbl_prev = QLabel("▼ Comparison:")
-            lbl_prev.setStyleSheet("color: #888; font-size: 10px; margin-top: 5px;")
-            lst_prev = QListWidget()
-            lst_prev.setStyleSheet("font-size: 11px; color: #ddd; background-color: #222;")
-            
-            preview_layout.addWidget(lbl_prev)
-            preview_layout.addWidget(lst_prev)
-            preview_container.setLayout(preview_layout)
-            
-            splitter.addWidget(preview_container)
-            
-            # 초기 비율 설정 (상단 60%, 하단 40% 정도)
-            splitter.setSizes([200, 100])
-            
-            main_v.addWidget(splitter)
-
-            # 이벤트 연결
+            preview_container = QWidget(); preview_layout = QVBoxLayout(); preview_layout.setContentsMargins(0, 0, 0, 0)
+            lbl_prev = QLabel("▼ Comparison:"); lbl_prev.setStyleSheet("color: #888; font-size: 10px; margin-top: 5px;")
+            lst_prev = QListWidget(); lst_prev.setStyleSheet("font-size: 11px; color: #ddd; background-color: #222;")
+            preview_layout.addWidget(lbl_prev); preview_layout.addWidget(lst_prev)
+            preview_container.setLayout(preview_layout); splitter.addWidget(preview_container)
+            splitter.setSizes([200, 100]); main_v.addWidget(splitter)
             lst.model().rowsMoved.connect(lambda: self.save_label_order(category_key, lst))
             btn_add.clicked.connect(lambda: self.add_new_label(lst, category_key))
             btn_edit.clicked.connect(lambda: self.rename_label_action(lst, label_col, category_key))
             btn_del.clicked.connect(lambda: self.delete_label(lst, label_col, category_key))
             lst.itemClicked.connect(lambda item: self.load_preview(label_col, item.text(), lst_prev))
             lst_prev.itemClicked.connect(lambda item: self.load_data(item.text()))
-            
             return grp, lst, lst_prev
 
         self.z3_grp, self.list_bot, self.prev_bot = create_label_zone("Zone 3: Bottom", "label_bot", "bot")
@@ -462,43 +390,78 @@ class DataLabelerTab(QWidget):
         self.btn_save = QPushButton("💾 Set Label (Save & Next)")
         self.btn_save.setStyleSheet("background-color: #2E7D32; color: white; font-weight: bold; padding: 10px;")
         self.btn_save.clicked.connect(self.save_and_next)
-        
         self.btn_bulk = QPushButton("⚡ Batch Apply to Search Results")
         self.btn_bulk.setStyleSheet("background-color: #F57C00; color: white; font-weight: bold; padding: 8px;")
         self.btn_bulk.clicked.connect(self.bulk_update_action)
-        
         self.btn_export = QPushButton("📤 Export Data")
         self.btn_export.clicked.connect(self.export_data)
         
         self.z5_grp.layout().addWidget(self.btn_save)
         self.z5_grp.layout().addWidget(self.btn_bulk)
         self.z5_grp.layout().addWidget(self.btn_export)
-        
         label_layout.addWidget(self.z3_grp); label_layout.addWidget(self.z4_grp); label_layout.addWidget(self.z5_grp)
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.zone1); splitter.addWidget(self.zone2); splitter.addWidget(self.zone_labels)
         splitter.setSizes([350, 600, 350])
         main_layout.addWidget(splitter)
 
-    # --- Event Filters ---
+    # --- Actions ---
+    def open_clustering_dialog(self):
+        if not self.db.conn: return
+        opts = self.get_filter_opts(); logic = self.get_logic_operator()
+        filtered_ids = self.db.get_filtered_ids(opts, logic)
+        if not filtered_ids: QMessageBox.warning(self, "Warning", "No data found."); return
+        dlg = ClusteringDialog(self, self.db, filtered_ids)
+        if dlg.exec_() == QDialog.Accepted:
+            self.load_labels_from_db(); self.refresh_stats(); self.load_list()
+
+    # [신규] 삭제 액션 핸들러
+    def delete_filtered_action(self):
+        if not self.db.conn: return
+        
+        # 1. 대상 개수 확인
+        opts = self.get_filter_opts(); logic = self.get_logic_operator()
+        count = self.db.get_total_count(opts, logic)
+        
+        if count == 0:
+            QMessageBox.warning(self, "Warning", "No data to delete.")
+            return
+            
+        # 2. 강력한 경고 메시지
+        msg = f"⚠️ WARNING: You are about to DELETE {count} items.\n\n"
+        msg += "This will verify and remove records from both DB and HDF5.\n"
+        msg += "This action CANNOT be undone.\n\n"
+        msg += "Are you absolutely sure?"
+        
+        reply = QMessageBox.question(self, "Delete Data", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            # 3. 삭제 실행
+            deleted_cnt = self.db.delete_filtered_data(opts, logic)
+            
+            if deleted_cnt >= 0:
+                self.refresh_stats()
+                self.reset_and_load() # 리스트 1페이지로 초기화
+                QMessageBox.information(self, "Deleted", f"Successfully deleted {deleted_cnt} items.")
+            else:
+                QMessageBox.critical(self, "Error", "An error occurred during deletion.")
+
+    # --- Event Filters, Handlers, Logic (Previous Code) ---
     def eventFilter(self, source, event):
         if source == self.table and event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_Down:
                 current_row = self.table.currentRow()
                 if current_row == self.table.rowCount() - 1 and self.current_page < self.total_pages:
-                    self.go_next_page()
-                    self.table.selectRow(0); self.on_table_click(0, 0)
+                    self.go_next_page(); self.table.selectRow(0); self.on_table_click(0, 0)
                     return True
             elif event.key() == Qt.Key_Up:
                 current_row = self.table.currentRow()
                 if current_row == 0 and self.current_page > 1:
-                    self.go_prev_page()
-                    last_row = self.table.rowCount() - 1
+                    self.go_prev_page(); last_row = self.table.rowCount() - 1
                     self.table.selectRow(last_row); self.on_table_click(last_row, 0)
                     return True
         return super().eventFilter(source, event)
 
-    # --- Handlers ---
     def on_current_cell_changed(self, current_row, current_col, previous_row, previous_col):
         if self.is_loading_table or current_row < 0: return
         item = self.table.item(current_row, 0)
@@ -524,14 +487,12 @@ class DataLabelerTab(QWidget):
             else: status_item.setText("Unlabeled"); status_item.setForeground(QColor("#FFaa00"))
             self.refresh_stats()
 
-    # --- Setting Handler ---
     def on_setting_changed(self):
         self.settings.setValue("colormap", self.combo_cmap.currentText())
         self.settings.setValue("min_freq", self.spin_min.value())
         self.settings.setValue("max_freq", self.spin_max.value())
         self.update_plots()
 
-    # --- Label Management Actions ---
     def add_new_label(self, list_widget, category):
         text, ok = QInputDialog.getText(self, "Add Label", "New Label Name:")
         if ok and text:
@@ -576,7 +537,6 @@ class DataLabelerTab(QWidget):
             if cnt >= 0: self.refresh_stats(); self.load_list(); QMessageBox.information(self, "Success", f"Updated {cnt} items.")
             else: QMessageBox.critical(self, "Error", "Batch update failed.")
 
-    # --- Main Logic ---
     def open_db_file(self):
         fname, _ = QFileDialog.getOpenFileName(self, "Select DB File", "", "SQLite DB (*.db)")
         if fname:
@@ -786,26 +746,6 @@ class DataLabelerTab(QWidget):
                 QMessageBox.information(self, "Success", f"Exported {count} items.\n{fname}")
             except Exception as e: QMessageBox.critical(self, "Error", str(e))
 
-    # [신규] 클러스터링 다이얼로그 열기
-    def open_clustering_dialog(self):
-        if not self.db.conn: return
-        
-        # 현재 필터 조건에 맞는 모든 ID 가져오기
-        opts = self.get_filter_opts()
-        logic = self.get_logic_operator()
-        filtered_ids = self.db.get_filtered_ids(opts, logic)
-        
-        if not filtered_ids:
-            QMessageBox.warning(self, "Warning", "No data found with current filters.")
-            return
-            
-        dlg = ClusteringDialog(self, self.db, filtered_ids)
-        if dlg.exec_() == QDialog.Accepted:
-            # 작업 완료 후 리스트 및 통계 갱신
-            self.load_labels_from_db() # 새 라벨이 생겼을 수 있으므로
-            self.refresh_stats()
-            self.load_list()
-            
 if __name__ == "__main__":
     pg.mkQApp()
     app = QApplication.instance()
