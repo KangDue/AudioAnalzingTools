@@ -63,6 +63,13 @@ class DataManager:
             )
         """)
         
+        # [신규] confidence 컬럼 추가 (기존 DB 호환성 유지)
+        try:
+            self.cursor.execute("ALTER TABLE noise_data ADD COLUMN confidence REAL DEFAULT 0.0")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass # 이미 있으면 무시
+        
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS label_settings (
                 category TEXT, name TEXT, ord INTEGER,
@@ -75,29 +82,21 @@ class DataManager:
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_label_top ON noise_data (label_top);")
         self.conn.commit()
 
-    # [복구됨] Labeler App에서 그래프 그릴 때 사용하는 필수 함수
     def get_signal_data(self, unique_id):
         try:
             with h5py.File(self.h5_path, 'r') as h5f:
                 if unique_id not in h5f: return None, None, None
-                
-                # Raw Data Read
                 raw_grp = h5f[unique_id]['raw']
                 raw_data = {k: raw_grp[k][:] for k in raw_grp.keys()}
-                
-                # Feature Data Read
                 feat_array = np.array([])
                 feat_names = []
-                
                 if 'feature' in h5f[unique_id]:
                     feat_array = h5f[unique_id]['feature'][:]
                     feat_names = self.generate_fixed_names()
-                
                 return raw_data, feat_array, feat_names
         except Exception:
             return None, None, None
 
-    # Clustering용 대량 Feature 로드 (Global Matrix 사용)
     def get_features_for_clustering(self, id_list):
         if not id_list: return None, None
         target_ids_set = set(id_list)
@@ -109,7 +108,6 @@ class DataManager:
                     mask = np.isin(all_ids, list(target_ids_set))
                     return all_feats[mask], all_ids[mask]
                 else:
-                    # Fallback
                     features = []; valid_ids = []
                     for uid in id_list:
                         if uid in h5f and 'feature' in h5f[uid]:
@@ -121,15 +119,11 @@ class DataManager:
             print(f"Feature Load Error: {e}")
             return None, None
 
-    # Ingester용 배치 저장
     def insert_batch_records(self, records):
         if not records: return True
         try:
             self.conn.execute("BEGIN TRANSACTION")
-            sql_data = []
-            new_feats_list = []
-            new_ids_list = []
-            
+            sql_data = []; new_feats_list = []; new_ids_list = []
             for meta, raw_data, feat_array in records:
                 sql_data.append((
                     meta['id'], meta['filename'], meta['path'], 
@@ -146,8 +140,6 @@ class DataManager:
             
             with h5py.File(self.h5_path, 'a') as h5f:
                 if 'global_feat_names' not in h5f.attrs: pass 
-                
-                # 개별 저장
                 for meta, raw_data, feat_array in records:
                     uid = meta['id']
                     if uid in h5f: del h5f[uid]
@@ -157,7 +149,6 @@ class DataManager:
                         raw_grp.create_dataset(ch, data=data, compression="lzf")
                     grp.create_dataset('feature', data=feat_array)
                 
-                # Global Matrix 저장
                 num_features = len(new_feats_list[0])
                 if 'global_features' not in h5f:
                     h5f.create_dataset('global_features', shape=(0, num_features), maxshape=(None, num_features), dtype='f4')
@@ -168,7 +159,6 @@ class DataManager:
                 dset_ids = h5f['global_ids']
                 curr_len = dset_feat.shape[0]
                 add_len = len(new_feats_list)
-                
                 dset_feat.resize((curr_len + add_len, num_features))
                 dset_ids.resize((curr_len + add_len,))
                 dset_feat[curr_len:] = np.array(new_feats_list, dtype=np.float32)
@@ -198,21 +188,17 @@ class DataManager:
             where_clause, params = self._build_query(filters, logic)
             set_clauses = []
             update_params = []
-            
             if top:
                 set_clauses.append("label_top = ?"); update_params.append(top)
             if mid and mid != "Unlabeled":
                 set_clauses.append("label_mid = ?"); update_params.append(mid)
             if bot and bot != "Unlabeled":
                 set_clauses.append("label_bot = ?"); update_params.append(bot)
-            
             if not set_clauses: return 0
-
             if top: set_clauses.append("is_labeled = 1")
-
+            
             query = f"UPDATE noise_data SET {', '.join(set_clauses)} {where_clause}"
             full_params = update_params + params
-            
             self.cursor.execute(query, full_params)
             updated_rows = self.cursor.rowcount
             self.conn.commit()
@@ -232,7 +218,8 @@ class DataManager:
             print(f"Delete Label Error: {e}")
             return False
 
-    def update_labels_from_dict(self, update_map, target_col):
+    # [수정됨] update_map과 confidence_map을 받아 일괄 업데이트
+    def update_labels_from_dict(self, update_map, target_col, confidence_map=None):
         if not update_map: return 0
         try:
             self.conn.execute("BEGIN TRANSACTION")
@@ -240,6 +227,11 @@ class DataManager:
             query = f"UPDATE noise_data SET {target_col} = ? WHERE id = ?"
             self.cursor.executemany(query, data_to_update)
             
+            # Confidence 업데이트
+            if confidence_map:
+                conf_data = [(conf, uid) for uid, conf in confidence_map.items()]
+                self.cursor.executemany("UPDATE noise_data SET confidence = ? WHERE id = ?", conf_data)
+
             # Status 동기화
             placeholders = ','.join(['?'] * len(update_map))
             sync_query = f"""
@@ -328,7 +320,6 @@ class DataManager:
         except: return False
 
     def insert_record(self, meta, raw_data, feat_array):
-        # 단건도 Matrix 호환성을 위해 Batch 함수 사용 권장
         return self.insert_batch_records([(meta, raw_data, feat_array)])
 
     def get_all_existing_ids(self):
@@ -352,7 +343,6 @@ class DataManager:
                 for row in rows:
                     uid = row['id']
                     if uid not in h5f: continue
-                    # Feature 개별 저장된 것 읽기
                     if 'feature' not in h5f[uid]: continue
                     feats = h5f[uid]['feature'][:]
                     if len(feats) != len(fixed_names): continue
@@ -399,52 +389,67 @@ class DataManager:
         self.cursor.execute(f"SELECT COUNT(*) FROM noise_data {w}", p)
         return self.cursor.fetchone()[0]
 
+    # [수정됨] confidence 컬럼 추가 조회
     def fetch_list(self, page=1, per_page=20, filters=None, logic="AND"):
         w, p = self._build_query(filters, logic)
         offset = (page-1)*per_page
         p.extend([per_page, offset])
-        self.cursor.execute(f"SELECT id, filename, is_labeled, label_top, label_mid, label_bot FROM noise_data {w} ORDER BY created_at DESC LIMIT ? OFFSET ?", p)
+        self.cursor.execute(f"SELECT id, filename, is_labeled, label_top, label_mid, label_bot, confidence FROM noise_data {w} ORDER BY created_at DESC LIMIT ? OFFSET ?", p)
         return self.cursor.fetchall()
 
     def get_ids_by_label(self, col, val, limit=50):
-        self.cursor.execute(f"SELECT id FROM noise_data WHERE {col} = ? LIMIT ?", (val, limit))
+        if val == "Unlabeled":
+            self.cursor.execute(f"SELECT id FROM noise_data WHERE {col} IS NULL OR {col} = '' LIMIT ?", (limit,))
+        else:
+            self.cursor.execute(f"SELECT id FROM noise_data WHERE {col} = ? LIMIT ?", (val, limit))
         return [r[0] for r in self.cursor.fetchall()]
+
+    def delete_filtered_data(self, filters, logic="AND"):
+        try:
+            ids_to_delete = self.get_filtered_ids(filters, logic)
+            if not ids_to_delete: return 0
+            self.conn.execute("BEGIN TRANSACTION")
+            w, p = self._build_query(filters, logic)
+            self.cursor.execute(f"DELETE FROM noise_data {w}", p)
+            with h5py.File(self.h5_path, 'a') as h5f:
+                for uid in ids_to_delete:
+                    if uid in h5f: del h5f[uid]
+            self.conn.commit()
+            return len(ids_to_delete)
+        except Exception as e:
+            print(f"Delete Filtered Error: {e}")
+            if self.conn: self.conn.rollback()
+            return -1
 
     def get_label_stats(self):
         s = {}
         if not self.cursor: return s
         for c in ['label_top', 'label_mid', 'label_bot']:
             try:
-                self.cursor.execute(f"SELECT {c}, COUNT(*) FROM noise_data WHERE {c} IS NOT NULL GROUP BY {c}")
-                s[c] = dict(self.cursor.fetchall())
-            except: s[c] = {}
+                self.cursor.execute(f"SELECT {c}, COUNT(*) FROM noise_data WHERE {c} IS NOT NULL AND {c} != '' GROUP BY {c}")
+                counts = dict(self.cursor.fetchall())
+                self.cursor.execute(f"SELECT COUNT(*) FROM noise_data WHERE {c} IS NULL OR {c} = ''")
+                counts["Unlabeled"] = self.cursor.fetchone()[0]
+                s[c] = counts
+            except Exception as e: 
+                print(f"Stats Error ({c}): {e}")
+                s[c] = {}
         return s
     
-    # [신규] 필터링된 데이터 영구 삭제 기능
-    def delete_filtered_data(self, filters, logic="AND"):
+    def get_training_data(self, target_col, selected_labels):
+        if not selected_labels: return None, None
         try:
-            # 1. 삭제할 ID 목록 가져오기
-            ids_to_delete = self.get_filtered_ids(filters, logic)
-            if not ids_to_delete: return 0
-            
-            self.conn.execute("BEGIN TRANSACTION")
-            
-            # 2. SQLite에서 삭제
-            w, p = self._build_query(filters, logic)
-            self.cursor.execute(f"DELETE FROM noise_data {w}", p)
-            
-            # 3. HDF5에서 그룹 삭제
-            # (참고: Global Matrix에서는 삭제되지 않고 남아있을 수 있으나, 
-            #  ID가 DB에서 사라지면 조회되지 않으므로 무방함)
-            with h5py.File(self.h5_path, 'a') as h5f:
-                for uid in ids_to_delete:
-                    if uid in h5f:
-                        del h5f[uid]
-            
-            self.conn.commit()
-            return len(ids_to_delete)
-            
+            placeholders = ','.join(['?'] * len(selected_labels))
+            query = f"SELECT id, {target_col} FROM noise_data WHERE {target_col} IN ({placeholders})"
+            self.cursor.execute(query, selected_labels)
+            rows = self.cursor.fetchall()
+            if not rows: return None, None
+            target_ids = [r['id'] for r in rows]
+            y = np.array([r[target_col] for r in rows])
+            X, valid_ids = self.get_features_for_clustering(target_ids)
+            id_to_label = dict(zip(target_ids, y))
+            y_aligned = np.array([id_to_label[uid] for uid in valid_ids])
+            return X, y_aligned
         except Exception as e:
-            print(f"Delete Filtered Error: {e}")
-            if self.conn: self.conn.rollback()
-            return -1
+            print(f"Training Data Load Error: {e}")
+            return None, None
