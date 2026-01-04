@@ -59,17 +59,17 @@ class DataManager:
                 year INTEGER, month INTEGER, day INTEGER, serial TEXT,
                 duration REAL, sample_rate INTEGER,
                 label_top TEXT DEFAULT NULL, label_mid TEXT DEFAULT NULL, label_bot TEXT DEFAULT NULL,
-                is_labeled INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                is_labeled INTEGER DEFAULT 0, confidence REAL DEFAULT 0.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
-        # [신규] confidence 컬럼 추가 (기존 DB 호환성 유지)
+        # 컬럼 없으면 추가 (마이그레이션)
         try:
             self.cursor.execute("ALTER TABLE noise_data ADD COLUMN confidence REAL DEFAULT 0.0")
             self.conn.commit()
-        except sqlite3.OperationalError:
-            pass # 이미 있으면 무시
-        
+        except: pass
+
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS label_settings (
                 category TEXT, name TEXT, ord INTEGER,
@@ -97,6 +97,39 @@ class DataManager:
         except Exception:
             return None, None, None
 
+    # [수정] Export 속도 개선 (Global Matrix 사용)
+    def export_training_data(self, output_path):
+        self.cursor.execute("SELECT id, label_bot, label_mid, label_top FROM noise_data WHERE is_labeled=1")
+        rows = self.cursor.fetchall()
+        if not rows: raise Exception("라벨링된 데이터가 없습니다.")
+        
+        target_ids = [r['id'] for r in rows]
+        meta_map = {r['id']: (r['label_bot'], r['label_mid'], r['label_top']) for r in rows}
+        
+        # HDF5 Matrix에서 한 번에 로드 (고속)
+        feats, valid_ids = self.get_features_for_clustering(target_ids)
+        
+        if feats is None: raise Exception("Feature 데이터를 찾을 수 없습니다. (H5 확인 필요)")
+        
+        # DataFrame 생성
+        fixed_names = self.generate_fixed_names()
+        df = pd.DataFrame(feats, columns=fixed_names)
+        
+        # ID 및 라벨 컬럼 추가
+        # valid_ids는 byte string일 수 있으므로 디코딩 처리
+        df['file_id'] = [x.decode('utf-8') if isinstance(x, bytes) else str(x) for x in valid_ids]
+        
+        # 라벨 매핑
+        df['label_bot'] = df['file_id'].map(lambda x: meta_map.get(x, (None, None, None))[0])
+        df['label_mid'] = df['file_id'].map(lambda x: meta_map.get(x, (None, None, None))[1])
+        df['label_top'] = df['file_id'].map(lambda x: meta_map.get(x, (None, None, None))[2])
+        
+        # 저장
+        cols = ['file_id'] + fixed_names + ['label_bot', 'label_mid', 'label_top']
+        df = df[cols]
+        df.to_csv(output_path, index=False, encoding='utf-8-sig')
+        return len(df)
+
     def get_features_for_clustering(self, id_list):
         if not id_list: return None, None
         target_ids_set = set(id_list)
@@ -104,10 +137,14 @@ class DataManager:
             with h5py.File(self.h5_path, 'r') as h5f:
                 if 'global_features' in h5f and 'global_ids' in h5f:
                     all_feats = h5f['global_features'][:]
-                    all_ids = h5f['global_ids'][:].astype(str)
-                    mask = np.isin(all_ids, list(target_ids_set))
-                    return all_feats[mask], all_ids[mask]
+                    all_ids = h5f['global_ids'][:]
+                    # Byte string handling
+                    all_ids_str = np.array([x.decode('utf-8') if isinstance(x, bytes) else str(x) for x in all_ids])
+                    
+                    mask = np.isin(all_ids_str, list(target_ids_set))
+                    return all_feats[mask], all_ids_str[mask]
                 else:
+                    # Fallback (Slow)
                     features = []; valid_ids = []
                     for uid in id_list:
                         if uid in h5f and 'feature' in h5f[uid]:
@@ -162,7 +199,7 @@ class DataManager:
                 dset_feat.resize((curr_len + add_len, num_features))
                 dset_ids.resize((curr_len + add_len,))
                 dset_feat[curr_len:] = np.array(new_feats_list, dtype=np.float32)
-                dset_ids[curr_len:] = np.array(new_ids_list)
+                dset_ids[curr_len:] = np.array(new_ids_list, dtype='S') # Store as bytes for h5py compatibility
             
             self.conn.commit()
             return True
@@ -218,7 +255,6 @@ class DataManager:
             print(f"Delete Label Error: {e}")
             return False
 
-    # [수정됨] update_map과 confidence_map을 받아 일괄 업데이트
     def update_labels_from_dict(self, update_map, target_col, confidence_map=None):
         if not update_map: return 0
         try:
@@ -227,23 +263,17 @@ class DataManager:
             query = f"UPDATE noise_data SET {target_col} = ? WHERE id = ?"
             self.cursor.executemany(query, data_to_update)
             
-            # Confidence 업데이트
             if confidence_map:
                 conf_data = [(conf, uid) for uid, conf in confidence_map.items()]
                 self.cursor.executemany("UPDATE noise_data SET confidence = ? WHERE id = ?", conf_data)
 
-            # Status 동기화
             placeholders = ','.join(['?'] * len(update_map))
             sync_query = f"""
                 UPDATE noise_data 
-                SET is_labeled = CASE 
-                    WHEN label_top IS NOT NULL AND label_top != '' THEN 1 
-                    ELSE 0 
-                END
+                SET is_labeled = CASE WHEN label_top IS NOT NULL AND label_top != '' THEN 1 ELSE 0 END
                 WHERE id IN ({placeholders})
             """
             self.cursor.execute(sync_query, list(update_map.keys()))
-            
             self.conn.commit()
             return len(data_to_update)
         except Exception as e:
@@ -266,10 +296,7 @@ class DataManager:
             self.cursor.execute(query, (value, uid))
             self.cursor.execute("""
                 UPDATE noise_data 
-                SET is_labeled = CASE 
-                    WHEN label_top IS NOT NULL AND label_top != '' THEN 1 
-                    ELSE 0 
-                END 
+                SET is_labeled = CASE WHEN label_top IS NOT NULL AND label_top != '' THEN 1 ELSE 0 END 
                 WHERE id = ?
             """, (uid,))
             self.conn.commit()
@@ -332,35 +359,6 @@ class DataManager:
         self.cursor.execute(f"SELECT id FROM noise_data {w}", p)
         return [r[0] for r in self.cursor.fetchall()]
 
-    def export_training_data(self, output_path):
-        self.cursor.execute("SELECT id, label_bot, label_mid, label_top FROM noise_data WHERE is_labeled=1")
-        rows = self.cursor.fetchall()
-        if not rows: raise Exception("라벨링된 데이터가 없습니다.")
-        fixed_names = self.generate_fixed_names()
-        export_data = []
-        if os.path.exists(self.h5_path):
-            with h5py.File(self.h5_path, 'r') as h5f:
-                for row in rows:
-                    uid = row['id']
-                    if uid not in h5f: continue
-                    if 'feature' not in h5f[uid]: continue
-                    feats = h5f[uid]['feature'][:]
-                    if len(feats) != len(fixed_names): continue
-                    row_dict = {"file_id": uid}
-                    for n, v in zip(fixed_names, feats): row_dict[n] = float(v)
-                    row_dict["label_bot"] = row['label_bot']
-                    row_dict["label_mid"] = row['label_mid']
-                    row_dict["label_top"] = row['label_top']
-                    export_data.append(row_dict)
-        if export_data:
-            df = pd.DataFrame(export_data)
-            final_cols = ['file_id'] + fixed_names + ['label_bot', 'label_mid', 'label_top']
-            final_cols = [c for c in final_cols if c in df.columns]
-            df = df[final_cols]
-            df.to_csv(output_path, index=False, encoding='utf-8-sig')
-            return len(df)
-        else: raise Exception("Export할 데이터가 없습니다.")
-
     def check_id_exists(self, unique_id):
         if not self.cursor: return False
         self.cursor.execute("SELECT 1 FROM noise_data WHERE id = ?", (unique_id,))
@@ -389,7 +387,6 @@ class DataManager:
         self.cursor.execute(f"SELECT COUNT(*) FROM noise_data {w}", p)
         return self.cursor.fetchone()[0]
 
-    # [수정됨] confidence 컬럼 추가 조회
     def fetch_list(self, page=1, per_page=20, filters=None, logic="AND"):
         w, p = self._build_query(filters, logic)
         offset = (page-1)*per_page

@@ -1,6 +1,7 @@
 import sys
 import os
 import pickle
+import copy
 
 # PyQt5 강제 설정
 os.environ["QT_API"] = "pyqt5"
@@ -143,6 +144,147 @@ class ShortcutSettingsDialog(QDialog):
             self.table.setItem(r, 1, QTableWidgetItem(v['target']))
             self.table.setItem(r, 2, QTableWidgetItem(v['value']))
 
+# [신규] Feature Compare Dialog (Group A vs Group B)
+class FeatureCompareDialog(QDialog):
+    def __init__(self, parent=None, db_manager=None):
+        super().__init__(parent)
+        self.setWindowTitle("Feature Comparison (A vs B)")
+        self.resize(900, 700)
+        self.db = db_manager
+        self.feat_names = self.db.generate_fixed_names()
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(); self.setLayout(layout)
+        
+        # 1. Feature Selection
+        feat_layout = QHBoxLayout()
+        self.combo_feat = QComboBox()
+        self.combo_feat.addItems(self.feat_names)
+        feat_layout.addWidget(QLabel("Target Feature:"))
+        feat_layout.addWidget(self.combo_feat, 1)
+        layout.addLayout(feat_layout)
+        
+        # 2. Group Selection (A & B)
+        grp_layout = QHBoxLayout()
+        
+        # Group A
+        grp_a = QGroupBox("Group A (Blue)")
+        l_a = QFormLayout()
+        self.combo_col_a = QComboBox(); self.combo_col_a.addItems(["label_bot", "label_mid", "label_top"])
+        self.combo_val_a = QComboBox()
+        self.combo_col_a.currentTextChanged.connect(lambda: self.load_labels(self.combo_col_a, self.combo_val_a))
+        l_a.addRow("Column:", self.combo_col_a)
+        l_a.addRow("Label:", self.combo_val_a)
+        grp_a.setLayout(l_a)
+        
+        # Group B
+        grp_b = QGroupBox("Group B (Red)")
+        l_b = QFormLayout()
+        self.combo_col_b = QComboBox(); self.combo_col_b.addItems(["label_bot", "label_mid", "label_top"])
+        self.combo_val_b = QComboBox()
+        self.combo_col_b.currentTextChanged.connect(lambda: self.load_labels(self.combo_col_b, self.combo_val_b))
+        l_b.addRow("Column:", self.combo_col_b)
+        l_b.addRow("Label:", self.combo_val_b)
+        grp_b.setLayout(l_b)
+        
+        grp_layout.addWidget(grp_a); grp_layout.addWidget(grp_b)
+        layout.addLayout(grp_layout)
+        
+        # Run Button
+        self.btn_run = QPushButton("📊 Compare Distributions")
+        self.btn_run.setFixedHeight(40)
+        self.btn_run.setStyleSheet("background-color: #3F51B5; color: white; font-weight: bold;")
+        self.btn_run.clicked.connect(self.run_comparison)
+        layout.addWidget(self.btn_run)
+        
+        # Plot
+        self.plot_widget = pg.PlotWidget(background='k')
+        self.plot_widget.setLabel('left', 'Density (Normalized)')
+        self.plot_widget.setLabel('bottom', 'Feature Value')
+        self.plot_widget.addLegend()
+        layout.addWidget(self.plot_widget)
+        
+        # Stats Info
+        self.lbl_stats = QLabel("Select groups and press Compare.")
+        self.lbl_stats.setStyleSheet("font-size: 13px; font-weight: bold; color: #DDD;")
+        self.lbl_stats.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.lbl_stats)
+
+        # Init Loads
+        self.load_labels(self.combo_col_a, self.combo_val_a)
+        self.load_labels(self.combo_col_b, self.combo_val_b)
+
+    def load_labels(self, col_combo, val_combo):
+        col = col_combo.currentText()
+        cat = 'top' if 'top' in col else ('mid' if 'mid' in col else 'bot')
+        vals = self.db.fetch_label_settings(cat)
+        val_combo.clear()
+        val_combo.addItem("Unlabeled")
+        val_combo.addItems([v for v in vals if v != "Unlabeled"])
+
+    def run_comparison(self):
+        col_a, val_a = self.combo_col_a.currentText(), self.combo_val_a.currentText()
+        col_b, val_b = self.combo_col_b.currentText(), self.combo_val_b.currentText()
+        feat_name = self.combo_feat.currentText()
+        feat_idx = self.combo_feat.currentIndex()
+        
+        self.plot_widget.clear()
+        self.btn_run.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        
+        try:
+            # Get IDs (Limit 해제)
+            ids_a = self.db.get_ids_by_label(col_a, val_a, limit=100000)
+            ids_b = self.db.get_ids_by_label(col_b, val_b, limit=100000)
+            
+            # Get Features
+            feats_a, _ = self.db.get_features_for_clustering(ids_a)
+            feats_b, _ = self.db.get_features_for_clustering(ids_b)
+            
+            data_a = feats_a[:, feat_idx] if feats_a is not None else np.array([])
+            data_b = feats_b[:, feat_idx] if feats_b is not None else np.array([])
+            
+            data_a = data_a[~np.isnan(data_a)]
+            data_b = data_b[~np.isnan(data_b)]
+            
+            if len(data_a) == 0 and len(data_b) == 0:
+                self.lbl_stats.setText("No data found for both groups.")
+                return
+
+            # Calc Bins
+            combined = np.concatenate([data_a, data_b])
+            if len(combined) == 0: return
+            
+            min_v, max_v = np.min(combined), np.max(combined)
+            bins = np.linspace(min_v, max_v, 50)
+            
+            # Plot A (Blue)
+            if len(data_a) > 0:
+                y_a, x_a = np.histogram(data_a, bins=bins, density=True)
+                bg_a = pg.BarGraphItem(x=x_a[:-1]+(x_a[1]-x_a[0])/2, height=y_a, width=(x_a[1]-x_a[0]), brush=pg.mkBrush(0, 0, 255, 120), pen=None, name=f"A: {val_a}")
+                self.plot_widget.addItem(bg_a)
+                
+            # Plot B (Red)
+            if len(data_b) > 0:
+                y_b, x_b = np.histogram(data_b, bins=bins, density=True)
+                bg_b = pg.BarGraphItem(x=x_b[:-1]+(x_b[1]-x_b[0])/2, height=y_b, width=(x_b[1]-x_b[0]), brush=pg.mkBrush(255, 0, 0, 120), pen=None, name=f"B: {val_b}")
+                self.plot_widget.addItem(bg_b)
+
+            # Update Stats
+            stats_txt = ""
+            if len(data_a) > 0:
+                stats_txt += f"[A] N:{len(data_a)} | Mean:{np.mean(data_a):.3f} | Std:{np.std(data_a):.3f}   "
+            if len(data_b) > 0:
+                stats_txt += f"[B] N:{len(data_b)} | Mean:{np.mean(data_b):.3f} | Std:{np.std(data_b):.3f}"
+            self.lbl_stats.setText(stats_txt)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+        finally:
+            self.btn_run.setEnabled(True)
+            QApplication.restoreOverrideCursor()
+
 class ClusteringDialog(QDialog):
     def __init__(self, parent=None, db_manager=None, filtered_ids=None):
         super().__init__(parent)
@@ -156,9 +298,10 @@ class ClusteringDialog(QDialog):
         l.addWidget(QLabel(f"Target Items: {len(self.target_ids)} items"))
         algo_grp = QGroupBox("Algorithm"); l_algo = QFormLayout()
         self.combo_algo = QComboBox(); self.combo_algo.addItems(["K-Means", "DBSCAN", "Agglomerative"])
-        self.spin_p1 = QSpinBox(); self.spin_p1.setRange(2, 50); self.spin_p1.setValue(5)
-        self.spin_p2 = QSpinBox(); self.spin_p2.setRange(2, 50); self.spin_p2.setValue(5)
-        l_algo.addRow("Algo:", self.combo_algo); l_algo.addRow("Param 1:", self.spin_p1); l_algo.addRow("Param 2:", self.spin_p2)
+        self.combo_algo.currentTextChanged.connect(self.update_params)
+        self.lbl_p1 = QLabel("Param 1:"); self.spin_p1 = QSpinBox(); self.spin_p1.setRange(2, 50); self.spin_p1.setValue(5)
+        self.lbl_p2 = QLabel("Param 2:"); self.spin_p2 = QSpinBox(); self.spin_p2.setRange(2, 50); self.spin_p2.setValue(5)
+        l_algo.addRow("Algo:", self.combo_algo); l_algo.addRow(self.lbl_p1, self.spin_p1); l_algo.addRow(self.lbl_p2, self.spin_p2)
         algo_grp.setLayout(l_algo); l.addWidget(algo_grp)
         lbl_grp = QGroupBox("Strategy"); l_lbl = QFormLayout()
         self.combo_target = QComboBox(); self.combo_target.addItems(["label_mid", "label_bot"])
@@ -167,6 +310,18 @@ class ClusteringDialog(QDialog):
         lbl_grp.setLayout(l_lbl); l.addWidget(lbl_grp)
         self.btn_run = QPushButton("Run"); self.btn_run.clicked.connect(self.run)
         l.addWidget(self.btn_run)
+        self.update_params()
+
+    def update_params(self):
+        algo = self.combo_algo.currentText()
+        if algo == "K-Means":
+            self.lbl_p1.setText("Clusters (k):"); self.lbl_p2.setVisible(False); self.spin_p2.setVisible(False)
+        elif algo == "DBSCAN":
+            self.lbl_p1.setText("Epsilon (x0.1):"); self.lbl_p2.setText("Min Samples:")
+            self.lbl_p2.setVisible(True); self.spin_p2.setVisible(True)
+        else:
+            self.lbl_p1.setText("Clusters (k):"); self.lbl_p2.setVisible(False); self.spin_p2.setVisible(False)
+
     def run(self):
         if not self.target_ids: return
         self.btn_run.setEnabled(False); QApplication.processEvents()
@@ -207,20 +362,17 @@ class TrainModelDialog(QDialog):
         layout = QVBoxLayout()
         self.setLayout(layout)
         
-        # 1. Settings (Target & Hyperparameters)
+        # 1. Settings
         set_grp = QGroupBox("Settings")
         set_layout = QFormLayout()
         
-        # Target
         self.combo_target = QComboBox()
         self.combo_target.addItems(["label_mid", "label_bot", "label_top"])
         self.combo_target.currentTextChanged.connect(self.load_labels)
         
-        # Toggle for Hyperparameters
         self.chk_adv = QCheckBox("Show Hyperparameters")
         self.chk_adv.toggled.connect(self.toggle_advanced)
         
-        # Advanced Param Widget (Initially Hidden)
         self.adv_widget = QWidget()
         adv_layout = QFormLayout()
         self.spin_estimators = QSpinBox(); self.spin_estimators.setRange(10, 500); self.spin_estimators.setValue(100)
@@ -230,12 +382,11 @@ class TrainModelDialog(QDialog):
         adv_layout.addRow("n_estimators:", self.spin_estimators)
         adv_layout.addRow("max_depth:", self.spin_depth)
         self.adv_widget.setLayout(adv_layout)
-        self.adv_widget.setVisible(False) # 숨김
+        self.adv_widget.setVisible(False)
 
         set_layout.addRow("Target:", self.combo_target)
         set_layout.addRow(self.chk_adv)
         set_layout.addRow(self.adv_widget)
-        
         set_grp.setLayout(set_layout)
         layout.addWidget(set_grp)
         
@@ -293,7 +444,9 @@ class TrainModelDialog(QDialog):
                 ('rf', RandomForestClassifier(
                     n_estimators=self.spin_estimators.value(), 
                     max_depth=None if self.spin_depth.value()==0 else self.spin_depth.value(), 
-                    random_state=42, n_jobs=-1
+                    random_state=42, 
+                    n_jobs=-1,
+                    class_weight='balanced'
                 ))
             ])
             pipe.fit(X, y)
@@ -351,6 +504,10 @@ class DataLabelerTab(QWidget):
         self.current_page = 1; self.items_per_page = 20; self.total_items = 0; self.total_pages = 1
         self.current_id = None; self.current_sr = 51200; self.current_data = {}; self.current_feat_arr = []; self.current_feat_names = []
         self.is_loading_table = False 
+        
+        self.ref_id = None
+        self.ref_data = None 
+        
         self.top_labels = ["Bearing", "Others"]; self.mid_labels = ["Normal", "Noise", "Vibration"]; self.bot_labels = ["OK", "NG", "Unknown"]
         self.init_ui()
 
@@ -417,6 +574,7 @@ class DataLabelerTab(QWidget):
         # --- Zone 2 ---
         self.zone2 = QGroupBox("Zone 2: Visualization"); z2_layout = QVBoxLayout()
         chk_style = "QCheckBox { color: black; background-color: #dddddd; padding: 4px; border-radius: 4px; font-weight: bold; }"
+        
         ctrl_layout = QHBoxLayout()
         self.chk_ch1 = QCheckBox("Ch1"); self.chk_ch1.setChecked(True); self.chk_ch1.setStyleSheet(chk_style)
         self.chk_ch2 = QCheckBox("Ch2"); self.chk_ch2.setChecked(True); self.chk_ch2.setStyleSheet(chk_style)
@@ -425,6 +583,16 @@ class DataLabelerTab(QWidget):
         for c in [self.chk_ch1, self.chk_ch2, self.chk_ch3, self.chk_ch4]: c.stateChanged.connect(self.update_plots); ctrl_layout.addWidget(c)
         z2_layout.addLayout(ctrl_layout)
         
+        # Reference & Dist Controls
+        ref_layout = QHBoxLayout()
+        self.btn_set_ref = QPushButton("📌 Set Ref"); self.btn_set_ref.clicked.connect(self.set_reference)
+        self.btn_set_ref.setStyleSheet("background-color: #8E24AA; color: white; font-weight: bold;")
+        self.lbl_ref_info = QLabel("Ref: None"); self.lbl_ref_info.setStyleSheet("color: #FFD700; font-size: 11px;")
+        self.chk_compare = QCheckBox("Compare View"); self.chk_compare.setStyleSheet(chk_style)
+        self.chk_compare.stateChanged.connect(self.update_plots)
+        ref_layout.addWidget(self.btn_set_ref); ref_layout.addWidget(self.lbl_ref_info); ref_layout.addWidget(self.chk_compare); ref_layout.addStretch()
+        z2_layout.addLayout(ref_layout)
+
         ctrl_layout2 = QHBoxLayout()
         self.chk_sync = QCheckBox("Sync X"); self.chk_sync.setStyleSheet(chk_style); self.chk_sync.stateChanged.connect(self.update_plots)
         self.combo_cmap = QComboBox(); self.combo_cmap.addItems(['inferno', 'viridis', 'plasma', 'magma', 'jet', 'hot'])
@@ -432,13 +600,19 @@ class DataLabelerTab(QWidget):
         self.spin_min = QSpinBox(); self.spin_min.setRange(0, 25600); self.spin_min.setSingleStep(100)
         self.spin_max = QSpinBox(); self.spin_max.setRange(100, 25600); self.spin_max.setSingleStep(100)
         self.spin_min.valueChanged.connect(self.on_setting_changed); self.spin_max.valueChanged.connect(self.on_setting_changed)
-        self.btn_feat = QPushButton("View Feature"); self.btn_feat.clicked.connect(self.show_feature_popup)
+        
+        self.btn_feat = QPushButton("Single Feat"); self.btn_feat.clicked.connect(self.show_feature_popup)
+        # [신규] Compare Dialog Button
+        self.btn_dist = QPushButton("📊 Compare"); self.btn_dist.clicked.connect(self.open_compare_dialog)
+        self.btn_dist.setStyleSheet("background-color: #3F51B5; color: white; font-weight: bold;")
+        
         ctrl_layout2.addWidget(self.chk_sync); ctrl_layout2.addWidget(QLabel("Color:")); ctrl_layout2.addWidget(self.combo_cmap)
         ctrl_layout2.addWidget(QLabel("Min:")); ctrl_layout2.addWidget(self.spin_min); ctrl_layout2.addWidget(QLabel("Max:")); ctrl_layout2.addWidget(self.spin_max)
-        ctrl_layout2.addWidget(self.btn_feat); z2_layout.addLayout(ctrl_layout2)
+        ctrl_layout2.addWidget(self.btn_feat); ctrl_layout2.addWidget(self.btn_dist)
+        z2_layout.addLayout(ctrl_layout2)
         
         self.scroll_area = QScrollArea(); self.scroll_area.setWidgetResizable(True)
-        self.plot_container = QWidget(); self.plot_layout = QVBoxLayout(); self.plot_layout.setSpacing(20)
+        self.plot_container = QWidget(); self.plot_layout = QVBoxLayout(); self.plot_layout.setSpacing(10)
         self.plot_container.setLayout(self.plot_layout); self.scroll_area.setWidget(self.plot_container)
         z2_layout.addWidget(self.scroll_area); self.zone2.setLayout(z2_layout)
 
@@ -494,19 +668,35 @@ class DataLabelerTab(QWidget):
             self.db.connect_db(f); self.lbl_db_name.setText(os.path.basename(f))
             self.db.sync_missing_labels(); self.load_labels_from_db(); self.reset_and_load(); self.refresh_stats()
 
+    def set_reference(self):
+        if not self.current_id or not self.current_data: return
+        self.ref_id = self.current_id
+        self.ref_data = copy.deepcopy(self.current_data)
+        self.lbl_ref_info.setText(f"Ref: {self.ref_id}")
+        if self.chk_compare.isChecked(): self.update_plots()
+
     def load_labels_from_db(self):
         def fill(l, c, d):
             l.clear(); 
             u = QListWidgetItem("Unlabeled"); u.setForeground(QColor("#FFaa00")); l.addItem(u)
             s = self.db.fetch_label_settings(c)
             if not s: self.db.save_label_settings(c, d); s = d
+            s = [x for x in s if x != "Unlabeled"]
             l.addItems(s)
         fill(self.list_top, 'top', self.top_labels); fill(self.list_mid, 'mid', self.mid_labels); fill(self.list_bot, 'bot', self.bot_labels)
         self.update_combos()
 
     def update_combos(self):
-        def fill(c, l): c.clear(); c.addItem("All"); c.addItems([l.item(i).text().split(' (')[0] for i in range(l.count())])
-        fill(self.combo_filter_top, self.list_top); fill(self.combo_filter_mid, self.list_mid); fill(self.combo_filter_bot, self.list_bot)
+        for c, l in zip([self.combo_filter_top, self.combo_filter_mid, self.combo_filter_bot], 
+                        [self.list_top, self.list_mid, self.list_bot]):
+            old_val = c.currentText()
+            c.blockSignals(True)
+            c.clear(); c.addItem("All")
+            c.addItems([l.item(i).text().split(' (')[0] for i in range(l.count())])
+            idx = c.findText(old_val)
+            if idx >= 0: c.setCurrentIndex(idx)
+            else: c.setCurrentIndex(0)
+            c.blockSignals(False)
 
     def reset_and_load(self): self.current_page = 1; self.load_list()
     
@@ -526,22 +716,17 @@ class DataLabelerTab(QWidget):
             rows = self.db.fetch_list(self.current_page, self.items_per_page, opts, logic)
             self.table.setRowCount(len(rows))
             for r, row in enumerate(rows):
-                # ID
                 i_id = QTableWidgetItem(str(row['id'])); i_id.setFlags(i_id.flags() & ~Qt.ItemIsEditable); self.table.setItem(r, 0, i_id)
-                # Labels
                 self.table.setItem(r, 1, QTableWidgetItem(row['label_bot'] if row['label_bot'] else ""))
                 self.table.setItem(r, 2, QTableWidgetItem(row['label_mid'] if row['label_mid'] else ""))
                 self.table.setItem(r, 3, QTableWidgetItem(row['label_top'] if row['label_top'] else ""))
-                # Status
                 st = "Labeled" if row['is_labeled'] else "Unlabeled"
                 i_st = QTableWidgetItem(st); i_st.setForeground(QColor("#00FF00") if row['is_labeled'] else QColor("#FFaa00"))
                 i_st.setFlags(i_st.flags() & ~Qt.ItemIsEditable); self.table.setItem(r, 4, i_st)
-                # Conf
                 cf = row['confidence'] if row['confidence'] else 0.0
                 i_cf = QTableWidgetItem(f"{cf:.2f}")
                 if cf > 0 and cf < 0.6: i_cf.setForeground(QColor("#FF5555"))
                 self.table.setItem(r, 5, i_cf)
-                
             self.lbl_page.setText(f"Page {self.current_page} / {self.total_pages} (Total {self.total_items})")
             self.btn_prev.setEnabled(self.current_page > 1); self.btn_next.setEnabled(self.current_page < self.total_pages)
         finally: self.is_loading_table = False
@@ -555,6 +740,7 @@ class DataLabelerTab(QWidget):
 
     def update_plots(self):
         while self.plot_layout.count(): c = self.plot_layout.takeAt(0); c.widget().deleteLater() if c.widget() else None
+        
         chs = []
         if self.chk_ch1.isChecked(): chs.append(('ch_1', 'Ch1'))
         if self.chk_ch2.isChecked(): chs.append(('ch_2', 'Ch2'))
@@ -564,6 +750,8 @@ class DataLabelerTab(QWidget):
         try: cm = pg.colormap.get(self.combo_cmap.currentText())
         except: cm = pg.colormap.get('inferno')
         
+        is_compare = self.chk_compare.isChecked() and (self.ref_data is not None)
+        
         for k, t in chs:
             if k not in self.current_data: continue
             sig = self.current_data[k]
@@ -571,10 +759,12 @@ class DataLabelerTab(QWidget):
             tr = QWidget(); tl = QHBoxLayout(); tl.setContentsMargins(0,0,0,0); tr.setLayout(tl)
             btn_p = QPushButton("▶"); btn_p.setFixedSize(30,20); btn_p.clicked.connect(lambda c, s=sig: self.play_audio(s))
             btn_s = QPushButton("■"); btn_s.setFixedSize(30,20); btn_s.clicked.connect(self.stop_audio)
-            tl.addWidget(QLabel(f"<b>{t}</b>")); tl.addWidget(btn_p); tl.addWidget(btn_s); tl.addStretch()
+            
+            title_txt = f"<b>{t} (Target)</b>" if is_compare else f"<b>{t}</b>"
+            tl.addWidget(QLabel(title_txt)); tl.addWidget(btn_p); tl.addWidget(btn_s); tl.addStretch()
             l.addWidget(tr)
             
-            pw = pg.PlotWidget(); pw.setMinimumHeight(200); p = pw.getPlotItem()
+            pw = pg.PlotWidget(); pw.setMinimumHeight(150 if is_compare else 200); p = pw.getPlotItem()
             f, time, Zxx = signal.stft(sig, fs=self.current_sr, nperseg=512, noverlap=256)
             spec = 20*np.log10(np.abs(Zxx)+1e-6)
             img = pg.ImageItem(); p.addItem(img); img.setImage(spec.T)
@@ -582,13 +772,40 @@ class DataLabelerTab(QWidget):
             img.setLookupTable(cm.getLookupTable()); img.setLevels([np.max(spec)-80, np.max(spec)])
             p.setYRange(self.spin_min.value(), self.spin_max.value(), padding=0)
             if self.chk_sync.isChecked() and prev: p.setXLink(prev)
-            l.addWidget(pw); self.plot_container.layout().addWidget(con); prev = p
+            l.addWidget(pw); prev = p
+            
+            if is_compare and k in self.ref_data:
+                ref_sig = self.ref_data[k]
+                tr_r = QWidget(); tl_r = QHBoxLayout(); tl_r.setContentsMargins(0,0,0,0); tr_r.setLayout(tl_r)
+                btn_p_r = QPushButton("▶ Ref"); btn_p_r.setFixedSize(50,20)
+                btn_p_r.setStyleSheet("background-color: #8E24AA; color: white; font-weight: bold; border:none;")
+                btn_p_r.clicked.connect(lambda c, s=ref_sig: self.play_audio(s))
+                tl_r.addWidget(QLabel(f"<b>{t} (Reference)</b>")); tl_r.addWidget(btn_p_r); tl_r.addStretch()
+                l.addWidget(tr_r)
+                
+                pw_r = pg.PlotWidget(); pw_r.setMinimumHeight(150); p_r = pw_r.getPlotItem()
+                f_r, t_r, Zxx_r = signal.stft(ref_sig, fs=self.current_sr, nperseg=512, noverlap=256)
+                spec_r = 20*np.log10(np.abs(Zxx_r)+1e-6)
+                img_r = pg.ImageItem(); p_r.addItem(img_r); img_r.setImage(spec_r.T)
+                img_r.setRect(float(t_r[0]), float(f_r[0]), float(t_r[-1]-t_r[0]), float(f_r[-1]-f_r[0]))
+                img_r.setLookupTable(cm.getLookupTable()); img_r.setLevels([np.max(spec_r)-80, np.max(spec_r)])
+                p_r.setYRange(self.spin_min.value(), self.spin_max.value(), padding=0)
+                if self.chk_sync.isChecked(): p_r.setXLink(p)
+                l.addWidget(pw_r)
+
+            self.plot_container.layout().addWidget(con)
 
     def play_audio(self, d): sd.stop(); sd.play(d, self.current_sr)
     def stop_audio(self): sd.stop()
     def show_feature_popup(self):
         if len(self.current_feat_arr)==0: return
         d = QDialog(self); t = QTextEdit(); t.setText(str(self.current_feat_arr)); l = QVBoxLayout(); l.addWidget(t); d.setLayout(l); d.exec_()
+
+    # [신규] Compare Dialog 열기
+    def open_compare_dialog(self):
+        if not self.db.conn: return
+        dlg = FeatureCompareDialog(self, self.db)
+        dlg.exec_()
 
     def get_filter_opts(self):
         o = {}
@@ -611,8 +828,7 @@ class DataLabelerTab(QWidget):
         if i.column() in cmap:
             col, cat = cmap[i.column()]
             self.db.update_single_label(uid, col, val)
-            self.db.ensure_label_exists(cat, val)
-            # Status update UI only
+            if self.db.ensure_label_exists(cat, val): self.load_labels_from_db()
             has_top = self.table.item(i.row(), 3).text().strip()!=""
             self.table.item(i.row(), 4).setText("Labeled" if has_top else "Unlabeled")
             self.table.item(i.row(), 4).setForeground(QColor("#00FF00") if has_top else QColor("#FFaa00"))
@@ -624,12 +840,10 @@ class DataLabelerTab(QWidget):
         if self.current_page<self.total_pages: self.current_page+=1; self.load_list()
 
     def save_label_order(self, c, l): 
-        # [수정] 저장 시 숫자 떼고 이름만 저장
-        items = [l.item(i).text().split(' (')[0] for i in range(l.count())]
-        self.db.save_label_settings(c, items)
+        self.db.save_label_settings(c, [l.item(i).text().split(' (')[0] for i in range(l.count())])
         
     def load_preview(self, c, v, l): 
-        l.clear(); l.addItems(self.db.get_ids_by_label(c, v))
+        l.clear(); l.addItems(self.db.get_ids_by_label(c, v.split(' (')[0]))
     
     def add_new_label(self, l, c):
         t, ok = QInputDialog.getText(self, "Add", "Name:"); 
@@ -639,15 +853,13 @@ class DataLabelerTab(QWidget):
         old = l.currentItem().text().split(' (')[0]
         new, ok = QInputDialog.getText(self, "Rename", "To:", text=old)
         if ok and new and new!=old: self.db.rename_label(c, col, old, new); self.load_labels_from_db(); self.refresh_stats(); self.load_list()
-        
-    # [수정] 삭제 시 UI 즉시 제거 및 DB 동기화
     def delete_label(self, l, col, c):
         if not l.currentItem(): return
         if QMessageBox.question(self, "Del", "Sure?")==QMessageBox.Yes:
             label_text = l.currentItem().text().split(' (')[0]
             if self.db.remove_label_from_records(col, label_text):
-                l.takeItem(l.row(l.currentItem())) # 리스트에서 제거
-                self.save_label_order(c, l)        # 변경된 리스트 DB에 저장
+                l.takeItem(l.row(l.currentItem()))
+                self.save_label_order(c, l)
                 self.refresh_stats(); self.load_list()
 
     def save_and_next(self):
@@ -690,7 +902,8 @@ class DataLabelerTab(QWidget):
         if not self.db.conn: return
         ids = self.db.get_filtered_ids(self.get_filter_opts(), self.get_logic_operator())
         if ids: 
-            if PredictModelDialog(self, self.db, ids).exec_()==QDialog.Accepted: self.load_list(); self.refresh_stats()
+            if PredictModelDialog(self, self.db, ids).exec_()==QDialog.Accepted: 
+                self.load_labels_from_db(); self.refresh_stats(); self.load_list()
     def open_clustering_dialog(self):
         if not self.db.conn: return
         ids = self.db.get_filtered_ids(self.get_filter_opts(), self.get_logic_operator())
@@ -746,10 +959,8 @@ class DataLabelerTab(QWidget):
                     st_item.setText("Labeled" if has_top else "Unlabeled")
                     st_item.setForeground(QColor("#00FF00") if has_top else QColor("#FFaa00"))
             
-            # [핵심 수정] 순서 변경: 로드 먼저 하고 -> 통계 업데이트 (숫자 꼬임 방지)
             self.load_labels_from_db()
             self.refresh_stats()
-            
             return True
         return False
 

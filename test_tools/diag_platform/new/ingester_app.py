@@ -9,22 +9,33 @@ from backend import DataManager
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import freeze_support
 
-# ==========================================
-# [수정됨] 파싱 실패 시 0.0 채우기 (데이터 밀림 방지)
-# ==========================================
+# [수정] ID 파싱 로직 개선
 def process_single_file_task(file_info):
-    """
-    파일 하나를 읽어서 파싱한 뒤, DB에 넣을 준비가 된 데이터(Dict, Numpy)를 반환합니다.
-    """
     sw_path, target_channels, metrics, bands = file_info
-    
     try:
         filename = os.path.basename(sw_path)
-        pattern = re.compile(r"(\d{8})_(\d{6})_([A-Za-z0-9]+)")
+        
+        # [수정된 Regex] 날짜_시간_시리얼 (SW 제외)
+        # 예: 20250101_120000_SERIAL123_SW.json -> 20250101_120000_SERIAL123
+        # 패턴 설명: (숫자8개)_(숫자6개)_(SW가 아닌 문자열)
+        pattern = re.compile(r"(\d{8})_(\d{6})_([^_]+)")
         match = pattern.search(filename)
         if not match: return None
 
-        date_part, time_part, serial_part = match.groups()
+        date_part, time_part, serial_candidate = match.groups()
+        
+        # 만약 시리얼이 'SW'라면, 그 다음 덩어리를 시리얼로 간주 (방어 코드)
+        if serial_candidate.upper() == "SW":
+             # 다시 시도 (날짜_시간_SW_시리얼 형태일 경우)
+             pattern2 = re.compile(r"(\d{8})_(\d{6})_SW_([^_]+)")
+             match2 = pattern2.search(filename)
+             if match2:
+                 date_part, time_part, serial_part = match2.groups()
+             else:
+                 serial_part = "Unknown"
+        else:
+            serial_part = serial_candidate
+
         unique_id = f"{date_part}_{time_part}_{serial_part}"
 
         # 1. SW JSON 읽기
@@ -53,27 +64,21 @@ def process_single_file_task(file_info):
                     ch_num = re.search(r"Ch(\d+)", k)
                     if ch_num:
                         ch_key = f"ch_{ch_num.group(1)}"
-                        # 내부 파싱 로직
                         parsed = []
                         try:
                             pairs = v.split('&')
                             for pair in pairs:
                                 if '=' in pair:
                                     k_in, v_in = pair.split('=', 1)
-                                    try: 
-                                        parsed.append(float(v_in))
-                                    except: 
-                                        # [수정] 실패 시 pass가 아니라 0.0을 넣어서 자리를 지킴
-                                        parsed.append(0.0) 
+                                    try: parsed.append(float(v_in))
+                                    except: parsed.append(0.0)
                         except: pass
                         feats_by_ch[ch_key] = parsed
 
         # 3. Feature Flattening
         flat_values = []
-        
         for ch in target_channels:
             ch_feats = feats_by_ch.get(ch, [])
-            # SF 파일 부재로 리스트가 비어있다면, 0.0으로 49개 채움 (SPL 1개 + 8*6개 = 49개 가정)
             if not ch_feats:
                 flat_values.extend([0.0] * 49) 
             else:
@@ -81,7 +86,7 @@ def process_single_file_task(file_info):
 
         feat_array = np.array(flat_values, dtype=np.float32)
         
-        # Duration
+        # duration
         first_key = next(iter(raw_data))
         duration = len(raw_data[first_key]) / sr
         
@@ -96,8 +101,6 @@ def process_single_file_task(file_info):
     except Exception as e:
         return None
 
-
-# --- Worker Thread ---
 class IngestionWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal()
@@ -127,21 +130,16 @@ class IngestionWorker(QThread):
         target_channels = ['ch_1', 'ch_2', 'ch_3', 'ch_4']
         metrics = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
         bands = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6']
-        pattern = re.compile(r"(\d{8})_(\d{6})_([A-Za-z0-9]+)")
 
         skipped_count = 0
         for fpath in sw_files:
             fname = os.path.basename(fpath)
-            match = pattern.search(fname)
-            if match:
-                d, t, s = match.groups()
-                uid = f"{d}_{t}_{s}"
-                if uid in existing_ids:
-                    skipped_count += 1
-                    continue
-                tasks.append((fpath, target_channels, metrics, bands))
+            # Pre-check logic roughly to skip faster
+            if fpath in existing_ids: # Weak check
+                pass 
+            tasks.append((fpath, target_channels, metrics, bands))
         
-        self.progress.emit(f"⚡ Starting Multiprocessing Pool... (To Process: {len(tasks)}, Skipped: {skipped_count})")
+        self.progress.emit(f"⚡ Starting Multiprocessing Pool... (Tasks: {len(tasks)})")
 
         batch_records = []
         processed_count = 0
@@ -153,12 +151,18 @@ class IngestionWorker(QThread):
                 result = future.result()
                 
                 if result:
+                    uid = result[0]['id']
+                    if uid in existing_ids:
+                        skipped_count += 1
+                        continue
+                        
                     batch_records.append(result)
+                    existing_ids.add(uid) # Add to memory set
                     processed_count += 1
                     
                     if len(batch_records) >= self.batch_size:
                         if self.db.insert_batch_records(batch_records):
-                            self.progress.emit(f"💾 Saved Batch: {processed_count}/{len(tasks)}")
+                            self.progress.emit(f"💾 Saved Batch: {processed_count} (Skipped: {skipped_count})")
                             batch_records = []
                         else:
                             self.progress.emit("❌ DB Write Failed!")
@@ -169,7 +173,6 @@ class IngestionWorker(QThread):
         self.progress.emit(f"✅ All Done. Processed: {processed_count}, Skipped: {skipped_count}")
         self.finished.emit()
 
-# --- Main App ---
 class IngesterApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -284,18 +287,8 @@ class IngesterApp(QMainWindow):
     def run_ingestion(self):
         if not self.db_manager.conn:
             default_dir = self.list_targets.item(0).text() if self.list_targets.count() > 0 else ""
-            
-            # [수정] 윈도우 기본 탐색기(Native Dialog) 강제 사용
-            # options 인자를 명시적으로 넘겨주면 OS 기본 대화상자를 우선 사용합니다.
             options = QFileDialog.Options()
-            
-            fname, _ = QFileDialog.getSaveFileName(
-                self, 
-                "출력 DB/H5 저장 (파일명을 입력하세요)", 
-                default_dir, 
-                "SQLite DB (*.db)", 
-                options=options
-            )
+            fname, _ = QFileDialog.getSaveFileName(self, "출력 DB/H5 저장", default_dir, "SQLite DB (*.db)", options=options)
             
             if not fname: return
                 
